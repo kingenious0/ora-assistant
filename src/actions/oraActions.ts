@@ -249,8 +249,14 @@ const APP_SCHEMES: Record<string, { scheme?: string; webFallback?: string; andro
 import { requireNativeModule } from 'expo-modules-core';
 
 let OraLauncher: any = null;
+let OraHardware: any = null;
 try {
   OraLauncher = requireNativeModule('OraLauncher');
+} catch (e) {
+  // Graceful fallback for web/testing
+}
+try {
+  OraHardware = requireNativeModule('OraHardware');
 } catch (e) {
   // Graceful fallback for web/testing
 }
@@ -892,44 +898,81 @@ class OraActionController {
   }
 
   /**
-   * Lock Device Screen
+   * Lock Device Screen (Native Zero-Touch Screen Lock)
    */
   private async handleLockDevice(): Promise<ActionExecutionResult> {
-    if (Platform.OS === 'android') {
+    if (Platform.OS === 'android' && OraHardware?.lockScreen) {
       try {
-        // Direct to security / screen timeout or lock screen
-        await IntentLauncher.startActivityAsync('android.settings.SECURITY_SETTINGS').catch(() => {});
-      } catch (e) {}
+        const locked = await OraHardware.lockScreen();
+        if (locked) {
+          return {
+            success: true,
+            pillText: '🔒 Screen Locked',
+            spokenConfirmation: 'Phone locked.',
+            intentAction: 'lock_device',
+          };
+        }
+
+        // Direct user to Accessibility settings if not yet enabled
+        await IntentLauncher.startActivityAsync('android.settings.ACCESSIBILITY_SETTINGS').catch(() => {});
+        return {
+          success: true,
+          pillText: '🔒 Enable Lock in Accessibility',
+          spokenConfirmation: 'Please toggle Ora in Accessibility Settings so I can lock your screen directly.',
+          intentAction: 'lock_device',
+        };
+      } catch (e) {
+        console.warn('[OraActions] lockScreen error:', e);
+      }
     }
 
     return {
-      success: true,
-      pillText: '🔒 Screen Lock Directed',
-      spokenConfirmation: 'Opening lock screen settings.',
+      success: false,
+      pillText: '🔒 Screen Lock Unavailable',
+      spokenConfirmation: 'Unable to lock screen on this device.',
       intentAction: 'lock_device',
     };
   }
 
   /**
-   * Device Volume Control
+   * Device Volume Control (Native Audio Stream Adjustment with System Volume HUD)
    */
   private async handleVolumeControl(direction: string, value?: number): Promise<ActionExecutionResult> {
+    if (Platform.OS === 'android' && OraHardware?.adjustVolume) {
+      try {
+        const success = await OraHardware.adjustVolume(direction, value ?? null);
+        if (success) {
+          let msg = 'Volume adjusted.';
+          if (direction === 'mute') msg = 'Sound muted.';
+          else if (direction === 'unmute') msg = 'Sound unmuted.';
+          else if (direction === 'max') msg = 'Volume set to maximum.';
+          else if (value !== undefined) msg = `Volume set to ${value} percent.`;
+          else if (direction === 'up' || direction === 'raise' || direction === 'increase') msg = 'Volume increased.';
+          else if (direction === 'down' || direction === 'lower' || direction === 'decrease') msg = 'Volume decreased.';
+
+          return {
+            success: true,
+            pillText: `🔊 Volume: ${direction.toUpperCase()}`,
+            spokenConfirmation: msg,
+            intentAction: 'volume_control',
+          };
+        }
+      } catch (e) {
+        console.warn('[OraActions] OraHardware volume error:', e);
+      }
+    }
+
+    // Fallback if native module not reachable
     if (Platform.OS === 'android') {
       try {
         await IntentLauncher.startActivityAsync('android.settings.SOUND_SETTINGS').catch(() => {});
       } catch (e) {}
     }
 
-    let msg = 'Adjusting sound volume.';
-    if (direction === 'mute') msg = 'Sound muted.';
-    if (direction === 'unmute') msg = 'Sound unmuted.';
-    if (direction === 'max') msg = 'Volume set to maximum.';
-    if (value) msg = `Volume set to ${value} percent.`;
-
     return {
       success: true,
       pillText: `🔊 Volume: ${direction.toUpperCase()}`,
-      spokenConfirmation: msg,
+      spokenConfirmation: 'Adjusting sound settings.',
       intentAction: 'volume_control',
     };
   }

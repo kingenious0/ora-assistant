@@ -123,7 +123,7 @@ class ContactsService {
    * Enables disambiguation when the user has multiple contacts with the same or similar name.
    */
   public async resolveAllContacts(query: string): Promise<CachedContact[]> {
-    if (!this.isLoaded) {
+    if (!this.isLoaded || this.cache.length === 0) {
       await this.loadContacts();
     }
 

@@ -365,22 +365,12 @@ export default function App() {
             <Ionicons name="apps-outline" size={20} color="#94A3B8" />
           </Pressable>
 
-          {/* Discreet Ora Brand Pill with Live Contacts Counter */}
-          <Pressable
-            onPress={async () => {
-              showActionPill('Syncing Address Book...');
-              await contactsService.loadContacts();
-              const count = contactsService.getContactCount();
-              showActionPill(count > 0 ? `👥 ${count} Contacts Synced` : '⚠️ Grant Contacts Permission');
-            }}
-            style={({ pressed }) => [styles.brandPill, pressed && styles.iconButtonPressed]}
-          >
+          {/* Discreet Ora Brand Pill */}
+          <View style={styles.brandPill}>
             <View style={styles.sparkleDot} />
             <Text style={styles.brandText}>Ora</Text>
-            <Text style={styles.brandSubtitle}>
-              {contactsCount > 0 ? `${contactsCount} Contacts` : 'Offline Edge'}
-            </Text>
-          </Pressable>
+            <Text style={styles.brandSubtitle}>Offline Edge</Text>
+          </View>
 
           <Pressable
             onPress={() => setIsTextInputOpen(true)}
@@ -523,20 +513,6 @@ export default function App() {
                   <Text style={styles.sheetTitle}>ORA OFFLINE SYSTEM DASHBOARD</Text>
                   <Text style={styles.sheetSubtitle}>Zero-Cloud Edge Intelligence • 100% Private</Text>
                 </View>
-                <Pressable
-                  onPress={async () => {
-                    showActionPill('Syncing Contacts...');
-                    await contactsService.loadContacts();
-                    const count = contactsService.getContactCount();
-                    showActionPill(count > 0 ? `✅ ${count} Contacts Synced` : '⚠️ Grant Contacts Permission');
-                  }}
-                  style={({ pressed }) => [styles.syncButton, pressed && styles.iconButtonPressed]}
-                >
-                  <Ionicons name="sync-outline" size={13} color="#F59E0B" style={{ marginRight: 4 }} />
-                  <Text style={styles.syncButtonText}>
-                    {contactsCount > 0 ? `${contactsCount} Contacts` : 'Sync Contacts'}
-                  </Text>
-                </Pressable>
               </View>
 
               {/* Hardware & OS Subsystem Status Card */}
@@ -549,13 +525,13 @@ export default function App() {
                 <View style={styles.statusRow}>
                   <Ionicons name="hardware-chip-outline" size={13} color="#38BDF8" />
                   <Text style={styles.statusLabel}>Universal App Launcher:</Text>
-                  <Text style={styles.statusValue}>Android PackageManager</Text>
+                  <Text style={styles.statusValue}>Android PackageManager Active</Text>
                 </View>
                 <View style={styles.statusRow}>
                   <Ionicons name="people-outline" size={13} color="#F59E0B" />
-                  <Text style={styles.statusLabel}>Address Book Index:</Text>
+                  <Text style={styles.statusLabel}>Phonebook Engine:</Text>
                   <Text style={styles.statusValue}>
-                    {contactsCount > 0 ? `${contactsCount} Contacts Loaded` : 'Tap Sync to Index'}
+                    {contactsCount > 0 ? `${contactsCount} Contacts (Live Auto-Sync)` : 'Connecting Phonebook...'}
                   </Text>
                 </View>
               </View>

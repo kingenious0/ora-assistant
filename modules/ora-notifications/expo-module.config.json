@@ -1,0 +1,8 @@
+{
+  "name": "ora-notifications",
+  "platforms": ["android"],
+  "android": {
+    "package": "com.hex8.ora.notifications",
+    "modules": ["com.hex8.ora.notifications.NotificationsBridgeModule"]
+  }
+}

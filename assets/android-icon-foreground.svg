@@ -1,0 +1,47 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 432 432" width="432" height="432">
+  <defs>
+    <!-- Outer Warm Halo -->
+    <radialGradient id="fgHalo" cx="50%" cy="50%" r="50%">
+      <stop offset="0%" stop-color="#f59e0b" stop-opacity="0.4" />
+      <stop offset="65%" stop-color="#d97706" stop-opacity="0.1" />
+      <stop offset="100%" stop-color="#000000" stop-opacity="0" />
+    </radialGradient>
+
+    <!-- 3D Gold Sphere Gradient -->
+    <radialGradient id="fgOrbCore" cx="35%" cy="30%" r="65%">
+      <stop offset="0%" stop-color="#fed7aa" />
+      <stop offset="28%" stop-color="#f59e0b" />
+      <stop offset="62%" stop-color="#b45309" />
+      <stop offset="85%" stop-color="#78350f" />
+      <stop offset="100%" stop-color="#451a03" />
+    </radialGradient>
+
+    <!-- Specular Highlight -->
+    <linearGradient id="fgSpecular" x1="0%" y1="0%" x2="50%" y2="100%">
+      <stop offset="0%" stop-color="#ffffff" stop-opacity="0.75" />
+      <stop offset="100%" stop-color="#ffffff" stop-opacity="0" />
+    </linearGradient>
+  </defs>
+
+  <!-- Ambient Glow -->
+  <circle cx="216" cy="216" r="140" fill="url(#fgHalo)" />
+
+  <!-- Shadow Under Orb -->
+  <circle cx="216" cy="226" r="80" fill="#000000" opacity="0.45" filter="blur(8px)" />
+
+  <!-- Gold Orb Body -->
+  <circle cx="216" cy="216" r="80" fill="url(#fgOrbCore)" />
+  <circle cx="216" cy="216" r="80" fill="none" stroke="#fef3c7" stroke-width="1.8" stroke-opacity="0.35" />
+
+  <!-- Specular Reflection -->
+  <ellipse cx="194" cy="174" rx="28" ry="16" transform="rotate(-25 194 174)" fill="url(#fgSpecular)" />
+
+  <!-- 5 Voice Acoustic Bars -->
+  <g fill="#ffffff">
+    <rect x="183" y="200" width="6.5" height="32" rx="3.25" opacity="0.92" />
+    <rect x="196" y="186" width="6.5" height="60" rx="3.25" opacity="0.95" />
+    <rect x="210" y="176" width="6.5" height="80" rx="3.25" opacity="1.0" />
+    <rect x="223" y="191" width="6.5" height="50" rx="3.25" opacity="0.95" />
+    <rect x="236" y="203" width="6.5" height="26" rx="3.25" opacity="0.92" />
+  </g>
+</svg>

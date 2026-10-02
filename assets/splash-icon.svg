@@ -1,0 +1,26 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 200 200" width="200" height="200">
+  <defs>
+    <radialGradient id="spOrb" cx="35%" cy="30%" r="65%">
+      <stop offset="0%" stop-color="#fed7aa" />
+      <stop offset="28%" stop-color="#f59e0b" />
+      <stop offset="62%" stop-color="#b45309" />
+      <stop offset="100%" stop-color="#451a03" />
+    </radialGradient>
+    <linearGradient id="spSheen" x1="0%" y1="0%" x2="50%" y2="100%">
+      <stop offset="0%" stop-color="#ffffff" stop-opacity="0.8" />
+      <stop offset="100%" stop-color="#ffffff" stop-opacity="0" />
+    </linearGradient>
+  </defs>
+
+  <circle cx="100" cy="100" r="70" fill="url(#spOrb)" />
+  <circle cx="100" cy="100" r="70" fill="none" stroke="#fef3c7" stroke-width="1.5" stroke-opacity="0.4" />
+  <ellipse cx="80" cy="64" rx="25" ry="14" transform="rotate(-25 80 64)" fill="url(#spSheen)" />
+
+  <g fill="#ffffff">
+    <rect x="71" y="86" width="6" height="28" rx="3" opacity="0.9" />
+    <rect x="83" y="74" width="6" height="52" rx="3" opacity="0.95" />
+    <rect x="96" y="65" width="7" height="70" rx="3.5" opacity="1.0" />
+    <rect x="109" y="78" width="6" height="44" rx="3" opacity="0.95" />
+    <rect x="121" y="89" width="6" height="22" rx="3" opacity="0.9" />
+  </g>
+</svg>

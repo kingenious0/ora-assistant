@@ -1,0 +1,8 @@
+{
+  "name": "ora-hardware",
+  "platforms": ["android"],
+  "android": {
+    "package": "com.hex8.ora.hardware",
+    "modules": ["com.hex8.ora.hardware.HardwareModule"]
+  }
+}

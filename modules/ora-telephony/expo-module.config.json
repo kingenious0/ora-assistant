@@ -1,0 +1,8 @@
+{
+  "name": "ora-telephony",
+  "platforms": ["android"],
+  "android": {
+    "package": "com.hex8.ora.telephony",
+    "modules": ["com.hex8.ora.telephony.TelephonyBridgeModule"]
+  }
+}

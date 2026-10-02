@@ -1,0 +1,8 @@
+{
+  "name": "ora-launcher",
+  "platforms": ["android"],
+  "android": {
+    "package": "com.hex8.ora.launcher",
+    "modules": ["com.hex8.ora.launcher.AppLauncherModule"]
+  }
+}

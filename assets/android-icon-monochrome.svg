@@ -1,0 +1,13 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 432 432" width="432" height="432">
+  <!-- Outer Outline Ring -->
+  <circle cx="216" cy="216" r="76" fill="none" stroke="#FFFFFF" stroke-width="10" stroke-linecap="round" />
+
+  <!-- 5 Voice Equalizer Bars -->
+  <g fill="#FFFFFF">
+    <rect x="183" y="202" width="7" height="28" rx="3.5" />
+    <rect x="196" y="188" width="7" height="56" rx="3.5" />
+    <rect x="212" y="174" width="8" height="84" rx="4" />
+    <rect x="229" y="192" width="7" height="48" rx="3.5" />
+    <rect x="242" y="205" width="7" height="22" rx="3.5" />
+  </g>
+</svg>

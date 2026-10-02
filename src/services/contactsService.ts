@@ -17,19 +17,51 @@ export interface DisambiguationContext {
   timestamp: number;
 }
 
+const FAMILY_SYNONYMS: Record<string, string[]> = {
+  mummy: ['mom', 'mum', 'mummy', 'mama', 'mother'],
+  mum: ['mom', 'mum', 'mummy', 'mama', 'mother'],
+  mom: ['mom', 'mum', 'mummy', 'mama', 'mother'],
+  mama: ['mom', 'mum', 'mummy', 'mama', 'mother'],
+  mother: ['mom', 'mum', 'mummy', 'mama', 'mother'],
+  dad: ['dad', 'daddy', 'papa', 'father', 'pops'],
+  daddy: ['dad', 'daddy', 'papa', 'father', 'pops'],
+  papa: ['dad', 'daddy', 'papa', 'father', 'pops'],
+  father: ['dad', 'daddy', 'papa', 'father', 'pops'],
+};
+
 class ContactsService {
   private cache: CachedContact[] = [];
   private isLoaded: boolean = false;
   private permissionGranted: boolean = false;
   private pendingDisambiguation: DisambiguationContext | null = null;
+  private changeListeners: Set<(count: number) => void> = new Set();
+
+  public addChangeListener(listener: (count: number) => void): () => void {
+    this.changeListeners.add(listener);
+    listener(this.cache.length);
+    return () => this.changeListeners.delete(listener);
+  }
+
+  private notifyChange() {
+    for (const listener of this.changeListeners) {
+      try {
+        listener(this.cache.length);
+      } catch (e) {}
+    }
+  }
 
   /**
    * Request permission and index contacts in memory for instant offline lookups (<5ms).
    */
   public async loadContacts(): Promise<boolean> {
     try {
-      const { status } = await Contacts.requestPermissionsAsync();
-      this.permissionGranted = status === 'granted';
+      const current = await Contacts.getPermissionsAsync();
+      let granted = current.granted;
+      if (!granted) {
+        const req = await Contacts.requestPermissionsAsync();
+        granted = req.granted;
+      }
+      this.permissionGranted = granted;
 
       if (!this.permissionGranted) {
         console.warn('[ContactsService] Contacts permission not granted.');
@@ -37,19 +69,30 @@ class ContactsService {
       }
 
       const { data } = await Contacts.getContactsAsync({
-        fields: [Contacts.Fields.Name, Contacts.Fields.PhoneNumbers],
+        fields: [
+          Contacts.Fields.Name,
+          Contacts.Fields.FirstName,
+          Contacts.Fields.LastName,
+          Contacts.Fields.PhoneNumbers,
+        ],
+        pageSize: 10000,
       });
 
       if (data && data.length > 0) {
         const loaded: CachedContact[] = [];
         for (const item of data) {
-          const name = item.name || `${item.firstName || ''} ${item.lastName || ''}`.trim();
+          const name = (
+            item.name ||
+            `${item.firstName || ''} ${item.lastName || ''}`.trim() ||
+            item.company ||
+            ''
+          ).trim();
           if (!name) continue;
 
           const phoneNumbers = item.phoneNumbers || [];
           if (phoneNumbers.length === 0) continue;
 
-          // Pick primary or first available number
+          // Pick primary or first available valid phone number
           const primary = phoneNumbers.find((p) => p.isPrimary) || phoneNumbers[0];
           const rawNumber = primary?.number || '';
           const clean = rawNumber.replace(/[^\d+]/g, '');
@@ -66,6 +109,7 @@ class ContactsService {
 
         this.cache = loaded;
         this.isLoaded = true;
+        this.notifyChange();
       }
       return true;
     } catch (err) {
@@ -96,35 +140,59 @@ class ContactsService {
       }
     };
 
-    // 1. Direct equality (e.g. "Emmanuel" === "emmanuel")
-    for (const c of this.cache) {
-      if (c.name.toLowerCase() === cleanQuery) {
-        addMatch(c);
+    // Check if query is a family alias (e.g. Mummy -> Mom / Mama / Mother)
+    const searchTerms = FAMILY_SYNONYMS[cleanQuery] || [cleanQuery];
+
+    for (const term of searchTerms) {
+      // 1. Exact match
+      for (const c of this.cache) {
+        if (c.name.toLowerCase() === term) {
+          addMatch(c);
+        }
+      }
+
+      // 2. Starts with / Word boundary match (e.g. "Emmanuel" in "Emmanuel Asante")
+      for (const c of this.cache) {
+        const parts = c.name.toLowerCase().split(/[\s,.-]+/);
+        if (parts.some((p) => p === term || p.startsWith(term))) {
+          addMatch(c);
+        }
+      }
+
+      // 3. Substring includes
+      for (const c of this.cache) {
+        if (c.name.toLowerCase().includes(term)) {
+          addMatch(c);
+        }
       }
     }
 
-    // 2. Starts with / Substring / Word boundary (e.g. "Emmanuel" in "Emmanuel Work", "Emmanuel Asante")
-    for (const c of this.cache) {
-      const parts = c.name.toLowerCase().split(/\s+/);
-      if (parts.some((p) => p === cleanQuery || p.startsWith(cleanQuery))) {
-        addMatch(c);
-      }
-    }
-
-    // 3. Contains match
-    for (const c of this.cache) {
-      if (c.name.toLowerCase().includes(cleanQuery)) {
-        addMatch(c);
-      }
-    }
-
-    // 4. Fuzzy distance match (Levenshtein distance <= 2)
+    // 4. Fuzzy distance fallback (Levenshtein distance <= 2 on full names & first/last name tokens)
     if (matches.length === 0) {
-      const allNames = this.cache.map((c) => c.name);
-      const fuzzy = fuzzyMatch(query, allNames, 2);
-      if (fuzzy) {
-        const found = this.cache.find((c) => c.name === fuzzy.match);
-        if (found) addMatch(found);
+      for (const term of searchTerms) {
+        // A. Match against full names
+        const allNames = this.cache.map((c) => c.name);
+        const fuzzyFull = fuzzyMatch(term, allNames, 2);
+        if (fuzzyFull) {
+          const found = this.cache.find((c) => c.name === fuzzyFull.match);
+          if (found) addMatch(found);
+        }
+
+        // B. Match against individual name tokens (e.g. "Emmanuel" in "Emmanuel Asante")
+        if (matches.length === 0) {
+          for (const c of this.cache) {
+            const tokens = c.name.toLowerCase().split(/[\s,.-]+/);
+            for (const token of tokens) {
+              if (token.length >= 3) {
+                const fz = fuzzyMatch(term, [token], 2);
+                if (fz) {
+                  addMatch(c);
+                  break;
+                }
+              }
+            }
+          }
+        }
       }
     }
 
@@ -137,6 +205,14 @@ class ContactsService {
   public async resolveContact(query: string): Promise<CachedContact | null> {
     const all = await this.resolveAllContacts(query);
     return all.length > 0 ? all[0] : null;
+  }
+
+  public getContactCount(): number {
+    return this.cache.length;
+  }
+
+  public isCacheLoaded(): boolean {
+    return this.isLoaded;
   }
 
   /**

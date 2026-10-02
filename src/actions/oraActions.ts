@@ -246,20 +246,70 @@ const APP_SCHEMES: Record<string, { scheme?: string; webFallback?: string; andro
   },
 };
 
+import { requireNativeModule } from 'expo-modules-core';
+
+let OraLauncher: any = null;
+try {
+  OraLauncher = requireNativeModule('OraLauncher');
+} catch (e) {
+  // Graceful fallback for web/testing
+}
+
+export type SpeechStateListener = (speaking: boolean) => void;
+
 class OraActionController {
+  private _isSpeaking: boolean = false;
+  private speechListeners: Set<SpeechStateListener> = new Set();
+
+  public isSpeaking(): boolean {
+    return this._isSpeaking;
+  }
+
+  public addSpeechListener(listener: SpeechStateListener): () => void {
+    this.speechListeners.add(listener);
+    return () => this.speechListeners.delete(listener);
+  }
+
+  private setSpeaking(speaking: boolean) {
+    this._isSpeaking = speaking;
+    for (const listener of this.speechListeners) {
+      try {
+        listener(speaking);
+      } catch (e) {}
+    }
+  }
+
   /**
    * Speak confirmation text via local offline TTS.
+   * Auto-mutes recognition during speech to eliminate acoustic feedback loops.
    */
-  public speak(text: string): void {
+  public speak(text: string, onFinish?: () => void): void {
     try {
       Speech.stop();
+      this.setSpeaking(true);
+
+      const handleDone = () => {
+        // Guard buffer of 550ms so microphone does not pick up trailing speaker echo
+        setTimeout(() => {
+          this.setSpeaking(false);
+          onFinish?.();
+        }, 550);
+      };
+
       Speech.speak(text, {
         language: 'en-US',
         pitch: 1.0,
         rate: 1.05,
+        onStart: () => {
+          this.setSpeaking(true);
+        },
+        onDone: handleDone,
+        onStopped: handleDone,
+        onError: handleDone,
       });
     } catch (e) {
       console.warn('[OraActions] Offline TTS warning:', e);
+      this.setSpeaking(false);
     }
   }
 
@@ -463,6 +513,15 @@ class OraActionController {
     if (CONTACT_DIRECTORY[cleanKey]) {
       contactsService.clearPendingDisambiguation();
       return await this.handleDirectDial(CONTACT_DIRECTORY[cleanKey], contactQuery, simSlot);
+    }
+
+    if (contactsService.getContactCount() === 0 && !contactsService.hasPermission()) {
+      return {
+        success: false,
+        pillText: 'Contacts Permission Needed',
+        spokenConfirmation: 'Please allow Contacts permission in phone settings so I can access your phonebook.',
+        intentAction: 'make_call',
+      };
     }
 
     return {
@@ -682,7 +741,7 @@ class OraActionController {
   }
 
   /**
-   * System Clock Alarms via Android IntentLauncher
+   * System Clock Alarms via Android IntentLauncher & OraLauncher
    */
   private async handleClockAlert(timeStr: string, type: 'alarm' | 'timer', label?: string): Promise<ActionExecutionResult> {
     const parsed = this.parseTime(timeStr);
@@ -700,12 +759,23 @@ class OraActionController {
               },
             });
           } catch (secErr) {
-            await IntentLauncher.startActivityAsync('android.intent.action.SHOW_ALARMS').catch(async () => {
-              await IntentLauncher.startActivityAsync('android.intent.action.MAIN', {
-                packageName: 'com.google.android.deskclock',
-                category: 'android.intent.category.LAUNCHER',
-              }).catch(() => {});
-            });
+            // Xiaomi / Samsung / Pixel Clock package fallback
+            const clockPackages = [
+              'com.miui.clock',
+              'com.android.deskclock',
+              'com.google.android.deskclock',
+              'com.sec.android.app.clockpackage',
+            ];
+            let opened = false;
+            for (const pkg of clockPackages) {
+              if (OraLauncher?.launchAppByPackage) {
+                opened = await OraLauncher.launchAppByPackage(pkg).catch(() => false);
+                if (opened) break;
+              }
+            }
+            if (!opened) {
+              await IntentLauncher.startActivityAsync('android.intent.action.SHOW_ALARMS').catch(() => {});
+            }
           }
         } else {
           const totalSeconds = parsed.hour * 3600 + parsed.minute * 60;
@@ -743,45 +813,63 @@ class OraActionController {
 
   /**
    * Native App Launcher (WhatsApp Business, Snapchat, TikTok, etc.)
+   * Uses Android PackageManager via OraLauncher module to query real installed apps.
    */
   private async handleLaunchApp(appName: string): Promise<ActionExecutionResult> {
     const key = appName.toLowerCase().trim();
     const config = APP_SCHEMES[key];
     const displayLabel = config?.label || appName;
 
-    // 1. Try Android Native Packages
-    if (Platform.OS === 'android') {
-      const packages = config?.androidPackages || [];
-      for (const pkg of packages) {
-        try {
-          await IntentLauncher.startActivityAsync('android.intent.action.MAIN', {
-            packageName: pkg,
-            category: 'android.intent.category.LAUNCHER',
-          });
+    // 1. Try Native OraLauncher Module first (queries Android PackageManager for REAL installed apps)
+    if (Platform.OS === 'android' && OraLauncher) {
+      try {
+        // Try known packages first for speed
+        const packages = config?.androidPackages || [];
+        for (const pkg of packages) {
+          if (OraLauncher.launchAppByPackage) {
+            const launched = await OraLauncher.launchAppByPackage(pkg);
+            if (launched) {
+              return {
+                success: true,
+                pillText: `🚀 Opened ${displayLabel}`,
+                spokenConfirmation: `Opening ${displayLabel}.`,
+                intentAction: 'launch_app',
+              };
+            }
+          }
+        }
+
+        // Try searching all installed apps by label on the user's phone!
+        if (OraLauncher.launchAppByName) {
+          const launched = await OraLauncher.launchAppByName(appName);
+          if (launched) {
+            return {
+              success: true,
+              pillText: `🚀 Opened ${displayLabel}`,
+              spokenConfirmation: `Opening ${displayLabel}.`,
+              intentAction: 'launch_app',
+            };
+          }
+        }
+      } catch (e) {
+        console.warn('[OraActions] OraLauncher error:', e);
+      }
+    }
+
+    // 2. Try URI Scheme (e.g. whatsapp://, snapchat://, spotify://)
+    if (config?.scheme) {
+      try {
+        const canOpen = await Linking.canOpenURL(config.scheme).catch(() => false);
+        if (canOpen) {
+          await Linking.openURL(config.scheme);
           return {
             success: true,
             pillText: `🚀 Opened ${displayLabel}`,
             spokenConfirmation: `Opening ${displayLabel}.`,
             intentAction: 'launch_app',
           };
-        } catch (e) {
-          // Continue to next package candidate
         }
-      }
-    }
-
-    // 2. Try URI Scheme (e.g. whatsapp://, snapchat://, spotify://)
-    if (config?.scheme) {
-      const canOpen = await Linking.canOpenURL(config.scheme).catch(() => false);
-      if (canOpen) {
-        await Linking.openURL(config.scheme);
-        return {
-          success: true,
-          pillText: `🚀 Opened ${displayLabel}`,
-          spokenConfirmation: `Opening ${displayLabel}.`,
-          intentAction: 'launch_app',
-        };
-      }
+      } catch (e) {}
     }
 
     // 3. Web Fallback if installed app not present
@@ -795,11 +883,10 @@ class OraActionController {
       };
     }
 
-    // 4. Generic App fallback: open search for app
     return {
-      success: true,
-      pillText: `🚀 Opening ${displayLabel}`,
-      spokenConfirmation: `Opening ${displayLabel}.`,
+      success: false,
+      pillText: `App Not Found: ${displayLabel}`,
+      spokenConfirmation: `I couldn't find ${displayLabel} installed on your device.`,
       intentAction: 'launch_app',
     };
   }

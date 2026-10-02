@@ -34,6 +34,22 @@ class AppLauncherModule : Module() {
       }
     }
 
+    AsyncFunction("launchAppByPackage") { packageName: String ->
+      val context = appContext.reactContext ?: return@AsyncFunction false
+      val pm = context.packageManager
+      try {
+        val launchIntent = pm.getLaunchIntentForPackage(packageName.trim())
+        if (launchIntent != null) {
+          launchIntent.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+          context.startActivity(launchIntent)
+          return@AsyncFunction true
+        }
+        false
+      } catch (e: Exception) {
+        false
+      }
+    }
+
     AsyncFunction("getInstalledAppList") {
       val context = appContext.reactContext ?: return@AsyncFunction emptyList<Map<String, String>>()
       val pm = context.packageManager

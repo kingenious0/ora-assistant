@@ -8,6 +8,7 @@ import {
   TextInput,
   Modal,
   KeyboardAvoidingView,
+  ScrollView,
 } from 'react-native';
 import { SafeAreaProvider, SafeAreaView } from 'react-native-safe-area-context';
 import { StatusBar } from 'expo-status-bar';
@@ -30,19 +31,64 @@ import {
 import { contactsService } from './src/services/contactsService';
 import { foregroundVoiceManager } from './src/services/foregroundService';
 
-const QUICK_COMMANDS = [
-  'Turn on flashlight',
-  'Call Emmanuel',
-  'Open WhatsApp Business',
-  'Open Snapchat',
-  'Lock phone',
-  'What time is it?',
-  'Calculate 25 times 14',
-  'Open Wi-Fi settings',
-  'Volume up',
-  'Tell me a joke',
-  'Take a note: Meeting at 3',
-  'Battery level',
+interface CapabilityCategory {
+  id: string;
+  name: string;
+  icon: keyof typeof Ionicons.glyphMap;
+  description: string;
+  examples: { phrase: string; detail: string }[];
+}
+
+const CAPABILITY_GUIDE: CapabilityCategory[] = [
+  {
+    id: 'calls_sms',
+    name: 'Direct Calling & Messaging',
+    icon: 'call-outline',
+    description: 'Bypasses dialer; dials contacts or raw digits directly',
+    examples: [
+      { phrase: 'Call Emmanuel', detail: 'Address book contact lookup' },
+      { phrase: 'Call Mummy', detail: 'Family alias (Mom, Mum, Mama)' },
+      { phrase: 'Call 0244123456', detail: 'Direct numerical dialing' },
+      { phrase: "Text Emmanuel I'm on my way", detail: 'Zero-touch SMS dispatch' },
+    ],
+  },
+  {
+    id: 'apps',
+    name: 'Universal App Launcher',
+    icon: 'apps-outline',
+    description: 'Launches any installed app via Android PackageManager',
+    examples: [
+      { phrase: 'Open WhatsApp Business', detail: 'com.whatsapp.w4b package' },
+      { phrase: 'Open Snapchat', detail: 'com.snapchat.android package' },
+      { phrase: 'Open Camera', detail: 'Hardware camera interface' },
+      { phrase: 'Open Wi-Fi settings', detail: 'System connectivity panel' },
+    ],
+  },
+  {
+    id: 'clock_hardware',
+    name: 'Alarms & Hardware Control',
+    icon: 'alarm-outline',
+    description: 'Native system clock intents & physical toggles',
+    examples: [
+      { phrase: 'Set alarm for 7:00 AM', detail: 'Native clock alarm intent' },
+      { phrase: 'Timer for 5 minutes', detail: 'Countdown timer dispatch' },
+      { phrase: 'Turn on flashlight', detail: 'Physical LED torch trigger' },
+      { phrase: 'Lock phone', detail: 'Offline screen lock service' },
+    ],
+  },
+  {
+    id: 'productivity',
+    name: 'Productivity & Edge Calculations',
+    icon: 'calculator-outline',
+    description: 'Sub-15ms deterministic offline computation',
+    examples: [
+      { phrase: 'Calculate 25 times 14', detail: 'Edge arithmetic engine' },
+      { phrase: 'What time is it?', detail: 'Real-time spoken clock' },
+      { phrase: 'Battery level', detail: 'System power status readout' },
+      { phrase: 'Volume up', detail: 'Audio gain step control' },
+      { phrase: 'Take a note: Meeting at 3', detail: 'Offline audit memo store' },
+    ],
+  },
 ];
 
 export default function App() {
@@ -54,11 +100,19 @@ export default function App() {
   const [isTextInputOpen, setIsTextInputOpen] = useState<boolean>(false);
   const [typedInput, setTypedInput] = useState<string>('');
   const [isHandsFree, setIsHandsFree] = useState<boolean>(true);
+  const [contactsCount, setContactsCount] = useState<number>(contactsService.getContactCount());
 
   const [permission, requestPermission] = useCameraPermissions();
   const pillTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const voiceTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const handsFreeRestartRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+
+  // Sync real-time contacts count from cache
+  useEffect(() => {
+    return contactsService.addChangeListener((count) => {
+      setContactsCount(count);
+    });
+  }, []);
 
   // Request camera & contacts permissions on mount
   useEffect(() => {
@@ -67,6 +121,27 @@ export default function App() {
     }
     contactsService.loadContacts().catch(() => {});
   }, [permission]);
+
+  // ACOUSTIC ECHO SUPPRESSION:
+  // When Ora speaks via TTS, immediately stop speech recognition so Ora never hears its own voice.
+  // When TTS finishes, wait for trailing speaker echo to dissipate, then resume hands-free listening.
+  useEffect(() => {
+    const unsubscribe = oraActions.addSpeechListener((speaking) => {
+      if (speaking) {
+        try {
+          ExpoSpeechRecognitionModule.stop();
+        } catch (e) {}
+      } else {
+        if (isHandsFree && orbMode === 'idle') {
+          if (handsFreeRestartRef.current) clearTimeout(handsFreeRestartRef.current);
+          handsFreeRestartRef.current = setTimeout(() => {
+            startListeningSession(true);
+          }, 350);
+        }
+      }
+    });
+    return () => unsubscribe();
+  }, [isHandsFree, orbMode]);
 
   const showActionPill = (text: string) => {
     if (pillTimeoutRef.current) clearTimeout(pillTimeoutRef.current);
@@ -193,8 +268,11 @@ export default function App() {
   });
 
   useSpeechRecognitionEvent('result', (event) => {
+    // Acoustic Echo Guard: Drop any speech detected while Ora's loudspeaker is playing TTS response
+    if (oraActions.isSpeaking()) return;
+
     const text = event.results[0]?.transcript;
-    if (text) {
+    if (text && text.trim()) {
       setTranscript(text);
 
       const hasWakeWord = /\b(hey|ok|okay|hi|hello)?\s*ora\b/i.test(text);
@@ -218,6 +296,11 @@ export default function App() {
   });
 
   useSpeechRecognitionEvent('end', () => {
+    // If Ora is speaking, do not restart yet; the speech listener will restart once TTS completes
+    if (oraActions.isSpeaking()) {
+      return;
+    }
+
     if (isHandsFree && orbMode === 'idle') {
       if (handsFreeRestartRef.current) clearTimeout(handsFreeRestartRef.current);
       handsFreeRestartRef.current = setTimeout(() => {
@@ -282,12 +365,22 @@ export default function App() {
             <Ionicons name="apps-outline" size={20} color="#94A3B8" />
           </Pressable>
 
-          {/* Discreet Ora Brand Pill */}
-          <View style={styles.brandPill}>
+          {/* Discreet Ora Brand Pill with Live Contacts Counter */}
+          <Pressable
+            onPress={async () => {
+              showActionPill('Syncing Address Book...');
+              await contactsService.loadContacts();
+              const count = contactsService.getContactCount();
+              showActionPill(count > 0 ? `👥 ${count} Contacts Synced` : '⚠️ Grant Contacts Permission');
+            }}
+            style={({ pressed }) => [styles.brandPill, pressed && styles.iconButtonPressed]}
+          >
             <View style={styles.sparkleDot} />
             <Text style={styles.brandText}>Ora</Text>
-            <Text style={styles.brandSubtitle}>Offline Edge</Text>
-          </View>
+            <Text style={styles.brandSubtitle}>
+              {contactsCount > 0 ? `${contactsCount} Contacts` : 'Offline Edge'}
+            </Text>
+          </Pressable>
 
           <Pressable
             onPress={() => setIsTextInputOpen(true)}
@@ -414,7 +507,7 @@ export default function App() {
           </Pressable>
         </View>
 
-        {/* Quick Voice Command Sheet Modal */}
+        {/* Executive Voice Capabilities & Offline Dashboard Modal */}
         <Modal
           visible={isDrawerOpen}
           transparent
@@ -424,24 +517,88 @@ export default function App() {
           <Pressable style={styles.modalBackdrop} onPress={() => setIsDrawerOpen(false)}>
             <Animated.View entering={FadeInUp.duration(220)} style={styles.modalSheet}>
               <View style={styles.sheetHandle} />
-              <Text style={styles.sheetTitle}>VOICE COMMANDS (OFFLINE)</Text>
-              <Text style={styles.sheetSubtitle}>Select any preset or dictate naturally</Text>
 
-              <View style={styles.quickCommandsGrid}>
-                {QUICK_COMMANDS.map((cmd, i) => (
-                  <Pressable
-                    key={i}
-                    style={({ pressed }) => [
-                      styles.quickCommandItem,
-                      pressed && styles.quickCommandItemPressed,
-                    ]}
-                    onPress={() => handleSelectQuickCommand(cmd)}
-                  >
-                    <Ionicons name="radio-button-on" size={14} color="#D97706" style={{ marginRight: 8 }} />
-                    <Text style={styles.quickCommandText}>{cmd}</Text>
-                  </Pressable>
-                ))}
+              <View style={styles.sheetHeaderRow}>
+                <View style={{ flex: 1 }}>
+                  <Text style={styles.sheetTitle}>ORA OFFLINE SYSTEM DASHBOARD</Text>
+                  <Text style={styles.sheetSubtitle}>Zero-Cloud Edge Intelligence • 100% Private</Text>
+                </View>
+                <Pressable
+                  onPress={async () => {
+                    showActionPill('Syncing Contacts...');
+                    await contactsService.loadContacts();
+                    const count = contactsService.getContactCount();
+                    showActionPill(count > 0 ? `✅ ${count} Contacts Synced` : '⚠️ Grant Contacts Permission');
+                  }}
+                  style={({ pressed }) => [styles.syncButton, pressed && styles.iconButtonPressed]}
+                >
+                  <Ionicons name="sync-outline" size={13} color="#F59E0B" style={{ marginRight: 4 }} />
+                  <Text style={styles.syncButtonText}>
+                    {contactsCount > 0 ? `${contactsCount} Contacts` : 'Sync Contacts'}
+                  </Text>
+                </Pressable>
               </View>
+
+              {/* Hardware & OS Subsystem Status Card */}
+              <View style={styles.statusCard}>
+                <View style={styles.statusRow}>
+                  <Ionicons name="shield-checkmark" size={13} color="#10B981" />
+                  <Text style={styles.statusLabel}>Acoustic Echo Guard:</Text>
+                  <Text style={styles.statusValue}>Active (Feedback Suppressed)</Text>
+                </View>
+                <View style={styles.statusRow}>
+                  <Ionicons name="hardware-chip-outline" size={13} color="#38BDF8" />
+                  <Text style={styles.statusLabel}>Universal App Launcher:</Text>
+                  <Text style={styles.statusValue}>Android PackageManager</Text>
+                </View>
+                <View style={styles.statusRow}>
+                  <Ionicons name="people-outline" size={13} color="#F59E0B" />
+                  <Text style={styles.statusLabel}>Address Book Index:</Text>
+                  <Text style={styles.statusValue}>
+                    {contactsCount > 0 ? `${contactsCount} Contacts Loaded` : 'Tap Sync to Index'}
+                  </Text>
+                </View>
+              </View>
+
+              <Text style={styles.sectionHeader}>VOICE CAPABILITIES (SPOKEN TEMPLATES)</Text>
+
+              <ScrollView
+                style={styles.capabilitiesScroll}
+                contentContainerStyle={styles.capabilitiesContainer}
+                showsVerticalScrollIndicator={false}
+              >
+                {CAPABILITY_GUIDE.map((category) => (
+                  <View key={category.id} style={styles.categoryCard}>
+                    <View style={styles.categoryHeader}>
+                      <Ionicons name={category.icon} size={15} color="#F59E0B" style={{ marginRight: 8 }} />
+                      <View style={{ flex: 1 }}>
+                        <Text style={styles.categoryTitle}>{category.name}</Text>
+                        <Text style={styles.categoryDesc}>{category.description}</Text>
+                      </View>
+                    </View>
+
+                    <View style={styles.commandList}>
+                      {category.examples.map((cmd, idx) => (
+                        <Pressable
+                          key={idx}
+                          style={({ pressed }) => [
+                            styles.quickCommandItem,
+                            pressed && styles.quickCommandItemPressed,
+                          ]}
+                          onPress={() => handleSelectQuickCommand(cmd.phrase)}
+                        >
+                          <Ionicons name="mic-outline" size={13} color="#F59E0B" style={{ marginRight: 8 }} />
+                          <View style={{ flex: 1 }}>
+                            <Text style={styles.quickCommandText}>"{cmd.phrase}"</Text>
+                            <Text style={styles.quickCommandSub}>{cmd.detail}</Text>
+                          </View>
+                          <Ionicons name="arrow-forward" size={13} color="#475569" />
+                        </Pressable>
+                      ))}
+                    </View>
+                  </View>
+                ))}
+              </ScrollView>
             </Animated.View>
           </Pressable>
         </Modal>
@@ -715,9 +872,10 @@ const styles = StyleSheet.create({
     borderTopRightRadius: 28,
     borderWidth: 1,
     borderColor: 'rgba(255, 255, 255, 0.09)',
-    paddingHorizontal: 24,
+    paddingHorizontal: 20,
     paddingTop: 16,
-    paddingBottom: 40,
+    paddingBottom: 36,
+    maxHeight: '85%',
   },
   sheetHandle: {
     width: 38,
@@ -725,7 +883,13 @@ const styles = StyleSheet.create({
     borderRadius: 2,
     backgroundColor: 'rgba(255, 255, 255, 0.2)',
     alignSelf: 'center',
-    marginBottom: 18,
+    marginBottom: 14,
+  },
+  sheetHeaderRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'space-between',
+    marginBottom: 12,
   },
   sheetTitle: {
     fontSize: 11,
@@ -734,31 +898,111 @@ const styles = StyleSheet.create({
     letterSpacing: 1.2,
   },
   sheetSubtitle: {
-    fontSize: 13,
+    fontSize: 12,
     color: '#94A3B8',
-    marginTop: 4,
-    marginBottom: 18,
+    marginTop: 2,
   },
-  quickCommandsGrid: {
-    gap: 10,
+  syncButton: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    backgroundColor: 'rgba(245, 158, 11, 0.12)',
+    borderColor: 'rgba(245, 158, 11, 0.3)',
+    borderWidth: 1,
+    paddingVertical: 5,
+    paddingHorizontal: 10,
+    borderRadius: 9999,
+  },
+  syncButtonText: {
+    fontSize: 11,
+    fontWeight: '700',
+    color: '#F59E0B',
+  },
+  statusCard: {
+    backgroundColor: 'rgba(255, 255, 255, 0.03)',
+    borderRadius: 14,
+    borderWidth: 1,
+    borderColor: 'rgba(255, 255, 255, 0.06)',
+    padding: 12,
+    gap: 8,
+    marginBottom: 14,
+  },
+  statusRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+  },
+  statusLabel: {
+    fontSize: 11,
+    fontWeight: '600',
+    color: '#94A3B8',
+    marginLeft: 6,
+    marginRight: 4,
+  },
+  statusValue: {
+    fontSize: 11,
+    fontWeight: '700',
+    color: '#F8FAFC',
+  },
+  sectionHeader: {
+    fontSize: 11,
+    fontWeight: '800',
+    color: '#64748B',
+    letterSpacing: 1,
+    marginBottom: 10,
+  },
+  capabilitiesScroll: {
+    maxHeight: 380,
+  },
+  capabilitiesContainer: {
+    paddingBottom: 24,
+    gap: 12,
+  },
+  categoryCard: {
+    backgroundColor: 'rgba(255, 255, 255, 0.025)',
+    borderRadius: 14,
+    borderWidth: 1,
+    borderColor: 'rgba(255, 255, 255, 0.06)',
+    padding: 12,
+  },
+  categoryHeader: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    marginBottom: 10,
+  },
+  categoryTitle: {
+    fontSize: 13,
+    fontWeight: '700',
+    color: '#F1F5F9',
+  },
+  categoryDesc: {
+    fontSize: 10,
+    color: '#64748B',
+    marginTop: 1,
+  },
+  commandList: {
+    gap: 6,
   },
   quickCommandItem: {
     flexDirection: 'row',
     alignItems: 'center',
     backgroundColor: 'rgba(255, 255, 255, 0.035)',
     borderWidth: 1,
-    borderColor: 'rgba(255, 255, 255, 0.07)',
-    borderRadius: 14,
-    paddingVertical: 14,
-    paddingHorizontal: 16,
+    borderColor: 'rgba(255, 255, 255, 0.06)',
+    borderRadius: 10,
+    paddingVertical: 10,
+    paddingHorizontal: 12,
   },
   quickCommandItemPressed: {
     backgroundColor: 'rgba(255, 255, 255, 0.08)',
   },
   quickCommandText: {
-    fontSize: 14,
+    fontSize: 13,
     fontWeight: '600',
     color: '#F1F5F9',
+  },
+  quickCommandSub: {
+    fontSize: 10,
+    color: '#64748B',
+    marginTop: 1,
   },
   textInputCard: {
     backgroundColor: '#0B0D14',

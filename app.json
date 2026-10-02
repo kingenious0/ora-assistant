@@ -42,6 +42,12 @@
       "expo-font",
       "expo-speech-recognition",
       [
+        "expo-contacts",
+        {
+          "contactsPermission": "Allow Ora to access your contacts to call and text hands-free."
+        }
+      ],
+      [
         "expo-splash-screen",
         {
           "backgroundColor": "#0A0B0E",

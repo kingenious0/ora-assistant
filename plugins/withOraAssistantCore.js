@@ -64,6 +64,23 @@ const withOraAssistantManifest = (config) => {
       }
     }
 
+    // Ensure queries tag exists for Android 11+ (API 30+) package visibility
+    if (!androidManifest['queries']) {
+      androidManifest['queries'] = [];
+    }
+    const hasMainQuery = androidManifest['queries'].some((q) =>
+      q.intent?.some((i) => i.action?.some((a) => a.$['android:name'] === 'android.intent.action.MAIN'))
+    );
+    if (!hasMainQuery) {
+      androidManifest['queries'].push({
+        intent: [
+          {
+            action: [{ $: { 'android:name': 'android.intent.action.MAIN' } }],
+          },
+        ],
+      });
+    }
+
     // 2. Add Android Digital Assistant intent filters to MainActivity
     const mainActivity = mainApplication.activity.find(
       (a) => a.$['android:name'] === '.MainActivity' || a.$['android:name'] === 'com.hex8.ora.MainActivity'

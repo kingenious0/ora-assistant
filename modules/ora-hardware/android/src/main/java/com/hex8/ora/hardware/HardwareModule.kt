@@ -10,6 +10,7 @@ import android.os.Build
 import android.view.WindowManager
 import com.hex8.ora.services.OraAccessibilityService
 import com.hex8.ora.services.OraDeviceAdminReceiver
+import com.hex8.ora.services.OraForegroundListenerService
 import expo.modules.kotlin.modules.Module
 import expo.modules.kotlin.modules.ModuleDefinition
 
@@ -164,6 +165,26 @@ class HardwareModule : Module() {
         }
       }
       true
+    }
+
+    AsyncFunction("startForegroundService") {
+      val context = appContext.reactContext ?: return@AsyncFunction false
+      try {
+        OraForegroundListenerService.startService(context)
+        true
+      } catch (e: Exception) {
+        false
+      }
+    }
+
+    AsyncFunction("stopForegroundService") {
+      val context = appContext.reactContext ?: return@AsyncFunction false
+      try {
+        OraForegroundListenerService.stopService(context)
+        true
+      } catch (e: Exception) {
+        false
+      }
     }
   }
 }

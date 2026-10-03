@@ -31,6 +31,12 @@ import {
 } from 'expo-speech-recognition';
 import { contactsService } from './src/services/contactsService';
 import { foregroundVoiceManager } from './src/services/foregroundService';
+import { requireNativeModule } from 'expo-modules-core';
+
+let OraHardware: any = null;
+try {
+  OraHardware = requireNativeModule('OraHardware');
+} catch (e) {}
 
 interface CapabilityCategory {
   id: string;
@@ -205,8 +211,14 @@ export default function App() {
   useEffect(() => {
     if (isHandsFree) {
       foregroundVoiceManager.startForegroundNotification().catch(() => {});
+      if (Platform.OS === 'android' && OraHardware?.startForegroundService) {
+        OraHardware.startForegroundService().catch(() => {});
+      }
     } else {
       foregroundVoiceManager.stopForegroundNotification().catch(() => {});
+      if (Platform.OS === 'android' && OraHardware?.stopForegroundService) {
+        OraHardware.stopForegroundService().catch(() => {});
+      }
     }
   }, [isHandsFree]);
 

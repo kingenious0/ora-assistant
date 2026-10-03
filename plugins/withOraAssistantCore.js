@@ -27,7 +27,9 @@ const withOraAssistantConfigXml = (config) => {
       const voiceXmlContent = `<?xml version="1.0" encoding="utf-8"?>
 <voice-interaction-service xmlns:android="http://schemas.android.com/apk/res/android"
     android:sessionService="com.hex8.ora.services.OraVoiceInteractionSessionService"
+    android:recognitionService="com.hex8.ora.services.OraRecognitionService"
     android:supportsAssist="true"
+    android:supportsVoiceInteraction="true"
     android:supportsLocalInteraction="true" />
 `;
       fs.writeFileSync(voiceXmlPath, voiceXmlContent, 'utf-8');
@@ -264,6 +266,40 @@ const withOraAssistantManifest = (config) => {
               {
                 $: {
                   'android:name': 'android.service.quicksettings.action.QS_TILE',
+                },
+              },
+            ],
+          },
+        ],
+      });
+    }
+
+    // F. Native Recognition Service (Required for Android Default Digital Assistant verification)
+    const recognitionServiceName = 'com.hex8.ora.services.OraRecognitionService';
+    const hasRecognitionService = mainApplication.service.some(
+      (s) => s.$['android:name'] === recognitionServiceName
+    );
+    if (!hasRecognitionService) {
+      mainApplication.service.push({
+        $: {
+          'android:name': recognitionServiceName,
+          'android:label': 'Ora Voice Recognition',
+          'android:permission': 'android.permission.BIND_VOICE_INTERACTION',
+          'android:exported': 'true',
+        },
+        'intent-filter': [
+          {
+            action: [
+              {
+                $: {
+                  'android:name': 'android.speech.RecognitionService',
+                },
+              },
+            ],
+            category: [
+              {
+                $: {
+                  'android:name': 'android.intent.category.DEFAULT',
                 },
               },
             ],

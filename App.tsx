@@ -268,18 +268,12 @@ export default function App() {
     }
   }, [isHandsFree, orbMode]);
 
-  // Sync Android Foreground Service Persistent Notification with Hands-Free mode
+  // Sync Android Persistent Notification with Hands-Free mode
   useEffect(() => {
     if (isHandsFree) {
       foregroundVoiceManager.startForegroundNotification().catch(() => {});
-      if (Platform.OS === 'android' && OraHardware?.startForegroundService) {
-        OraHardware.startForegroundService().catch(() => {});
-      }
     } else {
       foregroundVoiceManager.stopForegroundNotification().catch(() => {});
-      if (Platform.OS === 'android' && OraHardware?.stopForegroundService) {
-        OraHardware.stopForegroundService().catch(() => {});
-      }
     }
   }, [isHandsFree]);
 

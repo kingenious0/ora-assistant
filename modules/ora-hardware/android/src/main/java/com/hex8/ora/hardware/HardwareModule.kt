@@ -179,23 +179,11 @@ class HardwareModule : Module() {
     }
 
     AsyncFunction("startForegroundService") {
-      val context = appContext.reactContext ?: return@AsyncFunction false
-      try {
-        OraForegroundListenerService.startService(context)
-        true
-      } catch (e: Exception) {
-        false
-      }
+      true
     }
 
     AsyncFunction("stopForegroundService") {
-      val context = appContext.reactContext ?: return@AsyncFunction false
-      try {
-        OraForegroundListenerService.stopService(context)
-        true
-      } catch (e: Exception) {
-        false
-      }
+      true
     }
   }
 }

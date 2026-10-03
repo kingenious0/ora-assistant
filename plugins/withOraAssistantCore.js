@@ -72,11 +72,9 @@ const withOraAssistantManifest = (config) => {
 
     const requiredPermissions = [
       'android.permission.FOREGROUND_SERVICE',
-      'android.permission.FOREGROUND_SERVICE_MICROPHONE',
       'android.permission.POST_NOTIFICATIONS',
       'android.permission.WAKE_LOCK',
       'android.permission.CALL_PHONE',
-      'android.permission.SEND_SMS',
       'android.permission.READ_CONTACTS',
       'android.permission.RECORD_AUDIO',
       'android.permission.CAMERA',
@@ -259,21 +257,11 @@ const withOraAssistantManifest = (config) => {
       });
     }
 
-    // D. Native Foreground Microphone Listener Service
+    // D. Remove any legacy/crashing OraForegroundListenerService
     const foregroundServiceName = 'com.hex8.ora.services.OraForegroundListenerService';
-    const hasForegroundService = mainApplication.service.some(
-      (s) => s.$['android:name'] === foregroundServiceName
+    mainApplication.service = mainApplication.service.filter(
+      (s) => s.$['android:name'] !== foregroundServiceName
     );
-    if (!hasForegroundService) {
-      mainApplication.service.push({
-        $: {
-          'android:name': foregroundServiceName,
-          'android:label': 'Ora Assistant Voice Engine',
-          'android:foregroundServiceType': 'microphone',
-          'android:exported': 'false',
-        },
-      });
-    }
 
     // E. Quick Settings Tile Service
     const tileServiceName = 'com.hex8.ora.services.OraTileService';

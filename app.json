@@ -20,7 +20,6 @@
       },
       "permissions": [
         "android.permission.CALL_PHONE",
-        "android.permission.SEND_SMS",
         "android.permission.READ_CONTACTS",
         "android.permission.CAMERA",
         "android.permission.MODIFY_AUDIO_SETTINGS",

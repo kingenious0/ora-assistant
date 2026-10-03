@@ -11,7 +11,9 @@ import {
   ScrollView,
   PermissionsAndroid,
   StatusBar,
+  AppState,
 } from 'react-native';
+import * as Linking from 'expo-linking';
 import { SafeAreaProvider, SafeAreaView } from 'react-native-safe-area-context';
 import { CameraView, useCameraPermissions } from 'expo-camera';
 import { Ionicons } from '@expo/vector-icons';
@@ -125,7 +127,47 @@ export default function App() {
     });
   }, []);
 
-  // Request all necessary native permissions on mount
+  // Check and process any pending voice command from Power Button assistant session
+  const checkPendingVoiceCommand = () => {
+    if (Platform.OS === 'android' && OraHardware?.getPendingVoiceCommand) {
+      try {
+        const pendingCmd = OraHardware.getPendingVoiceCommand();
+        if (pendingCmd && typeof pendingCmd === 'string' && pendingCmd.trim()) {
+          processUtterance(pendingCmd.trim());
+        }
+      } catch (e) {}
+    }
+  };
+
+  // Deep Link & Power Button Assistant session receiver
+  useEffect(() => {
+    checkPendingVoiceCommand();
+
+    const handleDeepLink = (event: { url: string }) => {
+      try {
+        const parsed = Linking.parse(event.url);
+        const cmd = (parsed.queryParams?.text || parsed.queryParams?.ora_command) as string;
+        if (cmd && cmd.trim()) {
+          processUtterance(cmd.trim());
+        }
+      } catch (e) {}
+    };
+
+    const linkSub = Linking.addEventListener('url', handleDeepLink);
+    const appStateSub = AppState.addEventListener('change', (state) => {
+      if (state === 'active') {
+        checkPendingVoiceCommand();
+        contactsService.loadContacts().catch(() => {});
+      }
+    });
+
+    return () => {
+      linkSub.remove();
+      appStateSub.remove();
+    };
+  }, []);
+
+  // Request core native permissions on mount (excluding high-risk SMS to prevent MIUI security block)
   useEffect(() => {
     if (!permission?.granted) {
       requestPermission().catch(() => {});
@@ -133,10 +175,9 @@ export default function App() {
 
     if (Platform.OS === 'android') {
       PermissionsAndroid.requestMultiple([
+        PermissionsAndroid.PERMISSIONS.RECORD_AUDIO,
         PermissionsAndroid.PERMISSIONS.READ_CONTACTS,
         PermissionsAndroid.PERMISSIONS.CALL_PHONE,
-        PermissionsAndroid.PERMISSIONS.SEND_SMS,
-        PermissionsAndroid.PERMISSIONS.RECORD_AUDIO,
       ]).then(() => {
         contactsService.loadContacts().catch(() => {});
       }).catch(() => {
@@ -187,10 +228,28 @@ export default function App() {
         return;
       }
 
+      // Check available recognition service packages
+      let preferredPackage: string | undefined;
+      if (Platform.OS === 'android') {
+        try {
+          const services = ExpoSpeechRecognitionModule.getSpeechRecognitionServices();
+          if (Array.isArray(services) && services.length > 0) {
+            if (services.includes('com.google.android.googlequicksearchbox')) {
+              preferredPackage = 'com.google.android.googlequicksearchbox';
+            } else if (services.includes('com.google.android.tts')) {
+              preferredPackage = 'com.google.android.tts';
+            } else if (services.includes('com.google.android.as')) {
+              preferredPackage = 'com.google.android.as';
+            }
+          }
+        } catch (e) {}
+      }
+
       await ExpoSpeechRecognitionModule.start({
         lang: 'en-US',
         interimResults: true,
         continuous,
+        androidRecognitionServicePackage: preferredPackage,
       });
     } catch (e) {
       // Audio engine busy or restarting

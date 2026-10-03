@@ -598,7 +598,7 @@ class OraActionController {
 
     if (Platform.OS === 'android' && OraTelephony?.dialNumber) {
       try {
-        const dialed = await OraTelephony.dialNumber(targetPhone);
+        const dialed = await OraTelephony.dialNumber(targetPhone, simSlot);
         if (dialed) {
           return {
             success: true,

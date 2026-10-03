@@ -15,8 +15,19 @@ import expo.modules.kotlin.modules.Module
 import expo.modules.kotlin.modules.ModuleDefinition
 
 class HardwareModule : Module() {
+  companion object {
+    @JvmStatic
+    var pendingVoiceCommand: String? = null
+  }
+
   override fun definition() = ModuleDefinition {
     Name("OraHardware")
+
+    Function("getPendingVoiceCommand") {
+      val cmd = pendingVoiceCommand
+      pendingVoiceCommand = null
+      cmd
+    }
 
     AsyncFunction("setTorchMode") { enabled: Boolean ->
       val context = appContext.reactContext ?: return@AsyncFunction false

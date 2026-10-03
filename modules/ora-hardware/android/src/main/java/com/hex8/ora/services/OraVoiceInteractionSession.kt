@@ -5,8 +5,14 @@ import android.content.Intent
 import android.graphics.Color
 import android.graphics.Typeface
 import android.graphics.drawable.GradientDrawable
+import android.net.Uri
 import android.os.Bundle
+import android.os.Handler
+import android.os.Looper
 import android.service.voice.VoiceInteractionSession
+import android.speech.RecognitionListener
+import android.speech.RecognizerIntent
+import android.speech.SpeechRecognizer
 import android.util.TypedValue
 import android.view.Gravity
 import android.view.View
@@ -15,14 +21,19 @@ import android.view.animation.DecelerateInterpolator
 import android.widget.FrameLayout
 import android.widget.LinearLayout
 import android.widget.TextView
+import com.hex8.ora.hardware.HardwareModule
 
 /**
  * Milestone 6: Native Floating Bottom Sheet Overlay for VoiceInteractionSession
  * Floats smoothly over running apps on Android 8-15 (MIUI / HyperOS tested).
+ * Now actively performs live Speech Recognition and passes recognized speech to Ora.
  */
 class OraVoiceInteractionSession(context: Context) : VoiceInteractionSession(context) {
   private var bottomSheetView: LinearLayout? = null
   private var statusTextView: TextView? = null
+  private var orbView: View? = null
+  private var speechRecognizer: SpeechRecognizer? = null
+  private val mainHandler = Handler(Looper.getMainLooper())
 
   override fun onCreateContentView(): View {
     val rootLayout = FrameLayout(context).apply {
@@ -96,7 +107,11 @@ class OraVoiceInteractionSession(context: Context) : VoiceInteractionSession(con
         gravity = Gravity.CENTER_HORIZONTAL
         bottomMargin = dp(14f)
       }
+      setOnClickListener {
+        startListening()
+      }
     }
+    orbView = orb
     card.addView(orb)
 
     // Ora Brand Title
@@ -173,9 +188,109 @@ class OraVoiceInteractionSession(context: Context) : VoiceInteractionSession(con
         .setInterpolator(DecelerateInterpolator())
         .start()
     }
+
+    startListening()
+  }
+
+  private fun startListening() {
+    mainHandler.post {
+      try {
+        if (!SpeechRecognizer.isRecognitionAvailable(context)) {
+          statusTextView?.text = "Speech service unavailable"
+          return@post
+        }
+
+        speechRecognizer?.destroy()
+        speechRecognizer = SpeechRecognizer.createSpeechRecognizer(context)
+
+        val intent = Intent(RecognizerIntent.ACTION_RECOGNIZE_SPEECH).apply {
+          putExtra(RecognizerIntent.EXTRA_LANGUAGE_MODEL, RecognizerIntent.LANGUAGE_MODEL_FREE_FORM)
+          putExtra(RecognizerIntent.EXTRA_LANGUAGE, "en-US")
+          putExtra(RecognizerIntent.EXTRA_PARTIAL_RESULTS, true)
+          putExtra(RecognizerIntent.EXTRA_MAX_RESULTS, 3)
+        }
+
+        speechRecognizer?.setRecognitionListener(object : RecognitionListener {
+          override fun onReadyForSpeech(params: Bundle?) {
+            statusTextView?.text = "Listening... How can I help?"
+          }
+
+          override fun onBeginningOfSpeech() {
+            statusTextView?.text = "Listening..."
+          }
+
+          override fun onRmsChanged(rmsdB: Float) {
+            val scale = 1.0f + (rmsdB.coerceIn(0f, 10f) / 40f)
+            orbView?.scaleX = scale
+            orbView?.scaleY = scale
+          }
+
+          override fun onBufferReceived(buffer: ByteArray?) {}
+
+          override fun onEndOfSpeech() {
+            orbView?.scaleX = 1.0f
+            orbView?.scaleY = 1.0f
+            statusTextView?.text = "Processing..."
+          }
+
+          override fun onError(error: Int) {
+            orbView?.scaleX = 1.0f
+            orbView?.scaleY = 1.0f
+            statusTextView?.text = "Tap orb or say a command"
+          }
+
+          override fun onResults(results: Bundle?) {
+            orbView?.scaleX = 1.0f
+            orbView?.scaleY = 1.0f
+            val matches = results?.getStringArrayList(SpeechRecognizer.RESULTS_RECOGNITION)
+            val command = matches?.firstOrNull()?.trim()
+            if (!command.isNullOrEmpty()) {
+              statusTextView?.text = "\"$command\""
+              executeCommandInApp(command)
+            } else {
+              statusTextView?.text = "Didn't catch that. Tap orb to speak."
+            }
+          }
+
+          override fun onPartialResults(partialResults: Bundle?) {
+            val partial = partialResults?.getStringArrayList(SpeechRecognizer.RESULTS_RECOGNITION)?.firstOrNull()?.trim()
+            if (!partial.isNullOrEmpty()) {
+              statusTextView?.text = "\"$partial\""
+            }
+          }
+
+          override fun onEvent(eventType: Int, params: Bundle?) {}
+        })
+
+        speechRecognizer?.startListening(intent)
+      } catch (e: Exception) {
+        statusTextView?.text = "Tap orb to speak"
+      }
+    }
+  }
+
+  private fun executeCommandInApp(command: String) {
+    HardwareModule.pendingVoiceCommand = command
+    val launchIntent = context.packageManager.getLaunchIntentForPackage(context.packageName)?.apply {
+      flags = Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_SINGLE_TOP or Intent.FLAG_ACTIVITY_CLEAR_TOP
+      putExtra("ora_command", command)
+      data = Uri.parse("ora://command?text=" + Uri.encode(command))
+    }
+    if (launchIntent != null) {
+      context.startActivity(launchIntent)
+    }
+
+    mainHandler.postDelayed({
+      hide()
+    }, 600)
   }
 
   override fun onHide() {
     super.onHide()
+    try {
+      speechRecognizer?.stopListening()
+      speechRecognizer?.destroy()
+      speechRecognizer = null
+    } catch (e: Exception) {}
   }
 }

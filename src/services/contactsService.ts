@@ -1,5 +1,12 @@
+import { Platform } from 'react-native';
 import * as Contacts from 'expo-contacts';
+import { requireNativeModule } from 'expo-modules-core';
 import { fuzzyMatch } from '../engine/fuzzy';
+
+let OraTelephony: any = null;
+try {
+  OraTelephony = requireNativeModule('OraTelephony');
+} catch (e) {}
 
 export interface CachedContact {
   id: string;
@@ -55,6 +62,42 @@ class ContactsService {
    */
   public async loadContacts(): Promise<boolean> {
     try {
+      // 1. Try instant native ContentResolver query via OraTelephony
+      if (Platform.OS === 'android' && OraTelephony?.getAllContacts) {
+        try {
+          const nativeList = await OraTelephony.getAllContacts();
+          if (Array.isArray(nativeList) && nativeList.length > 0) {
+            const loaded: CachedContact[] = [];
+            const seen = new Set<string>();
+            for (const item of nativeList) {
+              const name = (item.name || '').trim();
+              const phone = (item.phone || '').trim();
+              const clean = phone.replace(/[^\d+]/g, '');
+              const key = `${name.toLowerCase()}_${clean}`;
+              if (name && clean && !seen.has(key)) {
+                seen.add(key);
+                loaded.push({
+                  id: item.id || name,
+                  name,
+                  phone,
+                  cleanPhone: clean,
+                });
+              }
+            }
+            if (loaded.length > 0) {
+              this.cache = loaded;
+              this.isLoaded = true;
+              this.permissionGranted = true;
+              this.notifyChange();
+              return true;
+            }
+          }
+        } catch (nativeErr) {
+          console.warn('[ContactsService] Native contact loading fallback:', nativeErr);
+        }
+      }
+
+      // 2. Fallback to expo-contacts
       const current = await Contacts.getPermissionsAsync();
       let granted = current.granted;
       if (!granted) {
@@ -193,6 +236,29 @@ class ContactsService {
             }
           }
         }
+      }
+    }
+
+    // 5. Native ContentResolver fallback via OraTelephony if cache yielded no matches
+    if (matches.length === 0 && Platform.OS === 'android' && OraTelephony?.lookupContactNumber) {
+      try {
+        for (const term of searchTerms) {
+          const directPhone = await OraTelephony.lookupContactNumber(term);
+          if (directPhone) {
+            const clean = directPhone.replace(/[^\d+]/g, '');
+            if (clean) {
+              addMatch({
+                id: term,
+                name: query,
+                phone: directPhone,
+                cleanPhone: clean,
+              });
+              break;
+            }
+          }
+        }
+      } catch (e) {
+        console.warn('[ContactsService] Native lookup fallback error:', e);
       }
     }
 

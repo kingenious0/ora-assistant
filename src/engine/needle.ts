@@ -415,13 +415,17 @@ export class NeedleEngine {
       }
 
       const deviceContacts = contactsService.getContactNames();
-      const candidateList = deviceContacts.length > 0 ? deviceContacts : this.knownContacts;
-      const fuzzyTarget = fuzzyMatch(rawTarget, candidateList, 2);
-      const finalContact = fuzzyTarget ? fuzzyTarget.match : rawTarget;
+      let finalContact = rawTarget;
+      if (deviceContacts.length > 0) {
+        const fuzzyTarget = fuzzyMatch(rawTarget, deviceContacts, 2);
+        if (fuzzyTarget) {
+          finalContact = fuzzyTarget.match;
+        }
+      }
       return {
         rawTranscript: transcript,
         intent: { action: 'make_call', contact: finalContact, sim_slot: simSlot },
-        confidence: fuzzyTarget ? 0.96 : 0.88,
+        confidence: 0.95,
         latencyMs: latency(),
         matchedTrigger: 'make_call',
       };
@@ -435,9 +439,13 @@ export class NeedleEngine {
       const rawContact = smsMatch[1].trim();
       const messageBody = smsMatch[2].trim();
       const deviceContacts = contactsService.getContactNames();
-      const candidateList = deviceContacts.length > 0 ? deviceContacts : this.knownContacts;
-      const fuzzyTarget = fuzzyMatch(rawContact, candidateList, 2);
-      const finalContact = fuzzyTarget ? fuzzyTarget.match : rawContact;
+      let finalContact = rawContact;
+      if (deviceContacts.length > 0) {
+        const fuzzyTarget = fuzzyMatch(rawContact, deviceContacts, 2);
+        if (fuzzyTarget) {
+          finalContact = fuzzyTarget.match;
+        }
+      }
       return {
         rawTranscript: transcript,
         intent: { action: 'send_sms', contact: finalContact, message: messageBody },

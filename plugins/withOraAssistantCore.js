@@ -27,7 +27,6 @@ const withOraAssistantConfigXml = (config) => {
       const voiceXmlContent = `<?xml version="1.0" encoding="utf-8"?>
 <voice-interaction-service xmlns:android="http://schemas.android.com/apk/res/android"
     android:sessionService="com.hex8.ora.services.OraVoiceInteractionSessionService"
-    android:recognitionService="com.hex8.ora.services.OraRecognitionService"
     android:supportsAssist="true"
     android:supportsLocalInteraction="true" />
 `;
@@ -110,6 +109,36 @@ const withOraAssistantManifest = (config) => {
           },
         ],
       });
+    }
+
+    // Explicitly allow querying speech recognition services (Google / system recognizer)
+    const hasSpeechQuery = androidManifest['queries'].some((q) =>
+      q.intent?.some((i) => i.action?.some((a) => a.$['android:name'] === 'android.speech.RecognitionService'))
+    );
+    if (!hasSpeechQuery) {
+      androidManifest['queries'].push({
+        intent: [
+          {
+            action: [{ $: { 'android:name': 'android.speech.RecognitionService' } }],
+          },
+        ],
+      });
+    }
+
+    const googlePackages = [
+      'com.google.android.googlequicksearchbox',
+      'com.google.android.tts',
+      'com.google.android.as',
+    ];
+    for (const pkg of googlePackages) {
+      const hasPkg = androidManifest['queries'].some((q) =>
+        q.package?.some((p) => p.$['android:name'] === pkg)
+      );
+      if (!hasPkg) {
+        androidManifest['queries'].push({
+          package: [{ $: { 'android:name': pkg } }],
+        });
+      }
     }
 
     // 2. Add Android Digital Assistant intent filters to MainActivity
@@ -265,40 +294,6 @@ const withOraAssistantManifest = (config) => {
               {
                 $: {
                   'android:name': 'android.service.quicksettings.action.QS_TILE',
-                },
-              },
-            ],
-          },
-        ],
-      });
-    }
-
-    // F. Native Recognition Service (Required for Android Default Digital Assistant verification)
-    const recognitionServiceName = 'com.hex8.ora.services.OraRecognitionService';
-    const hasRecognitionService = mainApplication.service.some(
-      (s) => s.$['android:name'] === recognitionServiceName
-    );
-    if (!hasRecognitionService) {
-      mainApplication.service.push({
-        $: {
-          'android:name': recognitionServiceName,
-          'android:label': 'Ora Voice Recognition',
-          'android:permission': 'android.permission.BIND_VOICE_INTERACTION',
-          'android:exported': 'true',
-        },
-        'intent-filter': [
-          {
-            action: [
-              {
-                $: {
-                  'android:name': 'android.speech.RecognitionService',
-                },
-              },
-            ],
-            category: [
-              {
-                $: {
-                  'android:name': 'android.intent.category.DEFAULT',
                 },
               },
             ],

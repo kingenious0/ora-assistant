@@ -10,6 +10,7 @@ import {
   KeyboardAvoidingView,
   ScrollView,
   PermissionsAndroid,
+  StatusBar,
 } from 'react-native';
 import { SafeAreaProvider, SafeAreaView } from 'react-native-safe-area-context';
 import { CameraView, useCameraPermissions } from 'expo-camera';
@@ -453,7 +454,7 @@ export default function App() {
   return (
     <SafeAreaProvider>
       <SafeAreaView style={styles.container}>
-        <StatusBar style="light" />
+        <StatusBar barStyle="light-content" backgroundColor="#050508" />
 
         {/* Hidden physical camera for hardware flashlight control in Expo Go */}
         {Platform.OS !== 'web' && permission?.granted && (

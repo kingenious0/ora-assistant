@@ -17,7 +17,7 @@ export type OraIntent =
   | { action: 'web_search'; query: string; engine: 'google' | 'youtube' }
   | { action: 'take_note'; text: string }
   | { action: 'disambiguate_choice'; index: number; name?: string }
-  | { action: 'conversational'; kind: 'identity' | 'joke' | 'capabilities' | 'greeting' | 'wake_prompt' };
+  | { action: 'conversational'; kind: 'identity' | 'joke' | 'capabilities' | 'greeting' | 'wake_prompt' | 'affection' | 'gratitude' | 'status' };
 
 export interface IntentResolution {
   rawTranscript: string;

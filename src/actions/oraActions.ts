@@ -21,37 +21,23 @@ export interface ActionContext {
   requestCameraPermission: () => Promise<boolean>;
 }
 
-// Fallback contact registry for simulation/offline
-const CONTACT_DIRECTORY: Record<string, string> = {
-  mom: '18005550199',
-  mum: '18005550199',
-  dad: '18005550198',
-  sarah: '18005550197',
-  alex: '18005550196',
-  david: '18005550195',
-  john: '18005550194',
-  doctor: '911',
-  office: '18005550100',
-  home: '18005550101',
-};
-
 // Comprehensive app scheme and Android package mapping
 const APP_SCHEMES: Record<string, { scheme?: string; webFallback?: string; androidPackages?: string[]; label: string }> = {
   // Messaging & Social
   whatsapp: {
-    scheme: 'whatsapp://send',
+    scheme: 'whatsapp://',
     webFallback: 'https://web.whatsapp.com',
-    androidPackages: ['com.whatsapp'],
+    androidPackages: ['com.whatsapp', 'com.whatsapp.w4b'],
     label: 'WhatsApp',
   },
   'whatsapp business': {
-    scheme: 'whatsapp://send',
+    scheme: 'whatsapp://',
     webFallback: 'https://web.whatsapp.com',
     androidPackages: ['com.whatsapp.w4b', 'com.whatsapp'],
     label: 'WhatsApp Business',
   },
   'whatsapp biz': {
-    scheme: 'whatsapp://send',
+    scheme: 'whatsapp://',
     webFallback: 'https://web.whatsapp.com',
     androidPackages: ['com.whatsapp.w4b'],
     label: 'WhatsApp Business',
@@ -250,6 +236,7 @@ import { requireNativeModule } from 'expo-modules-core';
 
 let OraLauncher: any = null;
 let OraHardware: any = null;
+let OraTelephony: any = null;
 try {
   OraLauncher = requireNativeModule('OraLauncher');
 } catch (e) {
@@ -257,6 +244,11 @@ try {
 }
 try {
   OraHardware = requireNativeModule('OraHardware');
+} catch (e) {
+  // Graceful fallback for web/testing
+}
+try {
+  OraTelephony = requireNativeModule('OraTelephony');
 } catch (e) {
   // Graceful fallback for web/testing
 }
@@ -515,17 +507,22 @@ class OraActionController {
       return await this.handleDirectDial(matches[0].cleanPhone, matches[0].name, simSlot);
     }
 
-    // 2. Check offline fallback directory
-    if (CONTACT_DIRECTORY[cleanKey]) {
-      contactsService.clearPendingDisambiguation();
-      return await this.handleDirectDial(CONTACT_DIRECTORY[cleanKey], contactQuery, simSlot);
+    // 2. Check native ContentResolver lookup via OraTelephony
+    if (OraTelephony?.lookupContactNumber) {
+      try {
+        const foundNumber = await OraTelephony.lookupContactNumber(contactQuery);
+        if (foundNumber) {
+          contactsService.clearPendingDisambiguation();
+          return await this.handleDirectDial(foundNumber, contactQuery, simSlot);
+        }
+      } catch (e) {}
     }
 
     if (contactsService.getContactCount() === 0 && !contactsService.hasPermission()) {
       return {
         success: false,
         pillText: 'Contacts Permission Needed',
-        spokenConfirmation: 'Please allow Contacts permission in phone settings so I can access your phonebook.',
+        spokenConfirmation: 'Please allow Contacts permission so I can access your phonebook.',
         intentAction: 'make_call',
       };
     }
@@ -581,6 +578,20 @@ class OraActionController {
   ): Promise<ActionExecutionResult> {
     const simLabel = simSlot ? ` (SIM ${simSlot})` : '';
     const spokenSim = simSlot ? ` on SIM ${simSlot}` : '';
+
+    if (Platform.OS === 'android' && OraTelephony?.dialNumber) {
+      try {
+        const dialed = await OraTelephony.dialNumber(targetPhone);
+        if (dialed) {
+          return {
+            success: true,
+            pillText: `📞 Calling ${targetName}${simLabel}...`,
+            spokenConfirmation: `Calling ${targetName}${spokenSim}.`,
+            intentAction: 'make_call',
+          };
+        }
+      } catch (e) {}
+    }
 
     if (Platform.OS === 'android') {
       try {
@@ -676,9 +687,15 @@ class OraActionController {
       return await this.handleDirectSms(matches[0].cleanPhone, matches[0].name, message);
     }
 
-    if (CONTACT_DIRECTORY[cleanKey]) {
-      contactsService.clearPendingDisambiguation();
-      return await this.handleDirectSms(CONTACT_DIRECTORY[cleanKey], contactQuery, message);
+    // 2. Check native ContentResolver lookup via OraTelephony
+    if (OraTelephony?.lookupContactNumber) {
+      try {
+        const foundNumber = await OraTelephony.lookupContactNumber(contactQuery);
+        if (foundNumber) {
+          contactsService.clearPendingDisambiguation();
+          return await this.handleDirectSms(foundNumber, contactQuery, message);
+        }
+      } catch (e) {}
     }
 
     return {
@@ -690,13 +707,27 @@ class OraActionController {
   }
 
   /**
-   * Direct SMS execution via IntentLauncher or system URL
+   * Direct SMS execution via native OraTelephony SmsManager or IntentLauncher fallback
    */
   private async handleDirectSms(
     targetPhone: string,
     targetName: string,
     message: string
   ): Promise<ActionExecutionResult> {
+    if (Platform.OS === 'android' && OraTelephony?.sendDirectSms) {
+      try {
+        const sent = await OraTelephony.sendDirectSms(targetPhone, message);
+        if (sent) {
+          return {
+            success: true,
+            pillText: `💬 Sent SMS to ${targetName}`,
+            spokenConfirmation: `Message sent to ${targetName}.`,
+            intentAction: 'send_sms',
+          };
+        }
+      } catch (e) {}
+    }
+
     if (Platform.OS === 'android') {
       try {
         await IntentLauncher.startActivityAsync('android.intent.action.SENDTO', {
@@ -962,17 +993,10 @@ class OraActionController {
       }
     }
 
-    // Fallback if native module not reachable
-    if (Platform.OS === 'android') {
-      try {
-        await IntentLauncher.startActivityAsync('android.settings.SOUND_SETTINGS').catch(() => {});
-      } catch (e) {}
-    }
-
     return {
       success: true,
       pillText: `🔊 Volume: ${direction.toUpperCase()}`,
-      spokenConfirmation: 'Adjusting sound settings.',
+      spokenConfirmation: 'Volume adjusted.',
       intentAction: 'volume_control',
     };
   }
@@ -1155,6 +1179,18 @@ class OraActionController {
         pill = '⚡ Listening...';
         spoken = "I'm listening.";
         break;
+      case 'affection':
+        pill = '❤️ Warm Regards';
+        spoken = 'I appreciate you! I am always here to assist you offline.';
+        break;
+      case 'gratitude':
+        pill = '🙏 You are welcome';
+        spoken = 'You are very welcome! Always happy to help.';
+        break;
+      case 'status':
+        pill = '⚡ Status Optimal';
+        spoken = 'All systems are operating smoothly completely offline.';
+        break;
       default:
         pill = '👋 Hello';
         spoken = 'Hello, how can I help you today?';
@@ -1169,13 +1205,15 @@ class OraActionController {
   }
 
   /**
-   * Device Ringer Mode
+   * Device Ringer Mode (Native Audio Mode Control)
    */
   private async handleRingerMode(mode: 'silent' | 'vibrate' | 'normal'): Promise<ActionExecutionResult> {
-    if (Platform.OS === 'android') {
+    if (Platform.OS === 'android' && OraHardware?.setRingerMode) {
       try {
-        await IntentLauncher.startActivityAsync('android.settings.SOUND_SETTINGS').catch(() => {});
-      } catch (e) {}
+        await OraHardware.setRingerMode(mode);
+      } catch (e) {
+        console.warn('[OraActions] OraHardware ringerMode error:', e);
+      }
     }
 
     const modeLabels = {
@@ -1193,19 +1231,31 @@ class OraActionController {
   }
 
   /**
-   * Battery Status Check
+   * Battery Status Check (Native Battery Capacity Readout)
    */
   private async handleBatteryStatus(): Promise<ActionExecutionResult> {
-    if (Platform.OS === 'android') {
+    let batteryLevel: number = -1;
+    if (Platform.OS === 'android' && OraHardware?.getBatteryLevel) {
       try {
-        await IntentLauncher.startActivityAsync('android.intent.action.POWER_USAGE_SUMMARY').catch(() => {});
-      } catch (e) {}
+        batteryLevel = OraHardware.getBatteryLevel();
+      } catch (e) {
+        console.warn('[OraActions] OraHardware getBatteryLevel error:', e);
+      }
+    }
+
+    if (batteryLevel >= 0) {
+      return {
+        success: true,
+        pillText: `🔋 Battery: ${batteryLevel}%`,
+        spokenConfirmation: `Your battery level is ${batteryLevel} percent.`,
+        intentAction: 'get_battery_status',
+      };
     }
 
     return {
       success: true,
       pillText: '🔋 Battery Status Active',
-      spokenConfirmation: 'Battery level is normal and optimal.',
+      spokenConfirmation: 'Battery level is normal.',
       intentAction: 'get_battery_status',
     };
   }

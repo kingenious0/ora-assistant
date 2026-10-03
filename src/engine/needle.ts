@@ -351,6 +351,42 @@ export class NeedleEngine {
         matchedTrigger: 'conversational',
       };
     }
+    if (/\b(i love you|love you|do you love me)\b/.test(clean)) {
+      return {
+        rawTranscript: transcript,
+        intent: { action: 'conversational', kind: 'affection' },
+        confidence: 0.98,
+        latencyMs: latency(),
+        matchedTrigger: 'conversational',
+      };
+    }
+    if (/\b(thank you|thanks|thanks a lot|thank you so much)\b/.test(clean)) {
+      return {
+        rawTranscript: transcript,
+        intent: { action: 'conversational', kind: 'gratitude' },
+        confidence: 0.98,
+        latencyMs: latency(),
+        matchedTrigger: 'conversational',
+      };
+    }
+    if (/\b(how are you|how are you doing|how's it going|how are things)\b/.test(clean)) {
+      return {
+        rawTranscript: transcript,
+        intent: { action: 'conversational', kind: 'status' },
+        confidence: 0.98,
+        latencyMs: latency(),
+        matchedTrigger: 'conversational',
+      };
+    }
+    if (/\b(who are you|what is your name|who made you)\b/.test(clean)) {
+      return {
+        rawTranscript: transcript,
+        intent: { action: 'conversational', kind: 'identity' },
+        confidence: 0.98,
+        latencyMs: latency(),
+        matchedTrigger: 'conversational',
+      };
+    }
 
     // 12. Make Call (e.g. "call Emmanuel", "dial Mom", "call Adwoa on SIM 2", "call 0244123456")
     const callMatch = clean.match(/^(?:please\s+)?(?:call|dial|phone|ring)\s+(?:to\s+)?(.+)$/i);

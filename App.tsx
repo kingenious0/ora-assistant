@@ -9,6 +9,7 @@ import {
   Modal,
   KeyboardAvoidingView,
   ScrollView,
+  PermissionsAndroid,
 } from 'react-native';
 import { SafeAreaProvider, SafeAreaView } from 'react-native-safe-area-context';
 import { StatusBar } from 'expo-status-bar';
@@ -106,6 +107,8 @@ export default function App() {
   const pillTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const voiceTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const handsFreeRestartRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const isManualListeningRef = useRef<boolean>(false);
+  const manualListeningTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
 
   // Sync real-time contacts count from cache
   useEffect(() => {
@@ -114,12 +117,26 @@ export default function App() {
     });
   }, []);
 
-  // Request camera & contacts permissions on mount
+  // Request all necessary native permissions on mount
   useEffect(() => {
     if (!permission?.granted) {
       requestPermission().catch(() => {});
     }
-    contactsService.loadContacts().catch(() => {});
+
+    if (Platform.OS === 'android') {
+      PermissionsAndroid.requestMultiple([
+        PermissionsAndroid.PERMISSIONS.READ_CONTACTS,
+        PermissionsAndroid.PERMISSIONS.CALL_PHONE,
+        PermissionsAndroid.PERMISSIONS.SEND_SMS,
+        PermissionsAndroid.PERMISSIONS.RECORD_AUDIO,
+      ]).then(() => {
+        contactsService.loadContacts().catch(() => {});
+      }).catch(() => {
+        contactsService.loadContacts().catch(() => {});
+      });
+    } else {
+      contactsService.loadContacts().catch(() => {});
+    }
   }, [permission]);
 
   // ACOUSTIC ECHO SUPPRESSION:
@@ -275,21 +292,38 @@ export default function App() {
     if (text && text.trim()) {
       setTranscript(text);
 
+      const isManual = isManualListeningRef.current;
       const hasWakeWord = /\b(hey|ok|okay|hi|hello)?\s*ora\b/i.test(text);
-      if (hasWakeWord && orbMode === 'idle') {
-        setOrbMode('listening');
-      }
 
-      if (event.isFinal) {
-        processUtterance(text);
+      if (isManual || orbMode === 'listening' || hasWakeWord) {
+        if (orbMode === 'idle') {
+          setOrbMode('listening');
+        }
+
+        if (event.isFinal) {
+          isManualListeningRef.current = false;
+          if (manualListeningTimerRef.current) clearTimeout(manualListeningTimerRef.current);
+          processUtterance(text);
+        }
       }
     }
   });
 
   useSpeechRecognitionEvent('error', (event) => {
-    if (event.error !== 'no-speech') {
-      console.warn('[Speech] recognition error:', event.error);
+    const err = event.error;
+    if (err !== 'no-speech' && err !== 'busy') {
+      console.warn('[Speech] recognition error:', err);
     }
+
+    // Do NOT abort manual listening window on transient recognizer errors (e.g. busy or no-speech)
+    if (isManualListeningRef.current) {
+      if (err === 'busy' || err === 'no-speech') {
+        return;
+      }
+      isManualListeningRef.current = false;
+      if (manualListeningTimerRef.current) clearTimeout(manualListeningTimerRef.current);
+    }
+
     if (orbMode === 'listening') {
       setOrbMode('idle');
     }
@@ -298,6 +332,12 @@ export default function App() {
   useSpeechRecognitionEvent('end', () => {
     // If Ora is speaking, do not restart yet; the speech listener will restart once TTS completes
     if (oraActions.isSpeaking()) {
+      return;
+    }
+
+    // If the user tapped the mic and is still in their manual listening window, keep the recognizer alive
+    if (isManualListeningRef.current) {
+      startListeningSession(false);
       return;
     }
 
@@ -315,6 +355,9 @@ export default function App() {
     if (voiceTimeoutRef.current) clearTimeout(voiceTimeoutRef.current);
 
     if (orbMode === 'listening' || orbMode === 'executing') {
+      // User tapped to cancel / interrupt
+      isManualListeningRef.current = false;
+      if (manualListeningTimerRef.current) clearTimeout(manualListeningTimerRef.current);
       try {
         await ExpoSpeechRecognitionModule.stop();
       } catch (e) {}
@@ -322,9 +365,29 @@ export default function App() {
       return;
     }
 
+    // User tapped to speak a direct command (Google Assistant mic style)
+    isManualListeningRef.current = true;
     setTranscript('');
     setOrbMode('listening');
-    await startListeningSession(false);
+
+    // Safe auto-timeout if user taps orb but never speaks
+    if (manualListeningTimerRef.current) clearTimeout(manualListeningTimerRef.current);
+    manualListeningTimerRef.current = setTimeout(() => {
+      if (isManualListeningRef.current) {
+        isManualListeningRef.current = false;
+        setOrbMode('idle');
+      }
+    }, 6000);
+
+    // If recognizer is already running in background, it will receive the user's speech directly without ERROR_BUSY
+    try {
+      const state = await ExpoSpeechRecognitionModule.getStateAsync();
+      if (state !== 'recognizing' && state !== 'starting') {
+        await startListeningSession(false);
+      }
+    } catch (e) {
+      await startListeningSession(false);
+    }
   };
 
   const handleSelectQuickCommand = (cmd: string) => {

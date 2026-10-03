@@ -76,19 +76,27 @@ class HardwareModule : Module() {
               audioManager.setStreamVolume(stream, half, AudioManager.FLAG_SHOW_UI)
             }
           }
-          "max", "maximum" -> {
+          "max", "maximum", "full" -> {
             val maxVol = audioManager.getStreamMaxVolume(stream)
             audioManager.setStreamVolume(stream, maxVol, AudioManager.FLAG_SHOW_UI)
           }
-          "set" -> {
+          "set", "percent", "percentage", "level" -> {
             if (value != null) {
               val maxVol = audioManager.getStreamMaxVolume(stream)
               val target = ((value / 100.0) * maxVol).toInt().coerceIn(0, maxVol)
               audioManager.setStreamVolume(stream, target, AudioManager.FLAG_SHOW_UI)
+            } else {
+              audioManager.adjustStreamVolume(stream, AudioManager.ADJUST_RAISE, AudioManager.FLAG_SHOW_UI)
             }
           }
           else -> {
-            audioManager.adjustStreamVolume(stream, AudioManager.ADJUST_RAISE, AudioManager.FLAG_SHOW_UI)
+            if (value != null) {
+              val maxVol = audioManager.getStreamMaxVolume(stream)
+              val target = ((value / 100.0) * maxVol).toInt().coerceIn(0, maxVol)
+              audioManager.setStreamVolume(stream, target, AudioManager.FLAG_SHOW_UI)
+            } else {
+              audioManager.adjustStreamVolume(stream, AudioManager.ADJUST_RAISE, AudioManager.FLAG_SHOW_UI)
+            }
           }
         }
         true

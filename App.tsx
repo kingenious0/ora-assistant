@@ -115,6 +115,8 @@ export default function App() {
   const handsFreeRestartRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const isManualListeningRef = useRef<boolean>(false);
   const manualListeningTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const latestTranscriptRef = useRef<string>('');
+  const silenceDebounceRef = useRef<ReturnType<typeof setTimeout> | null>(null);
 
   // Sync real-time contacts count from cache
   useEffect(() => {
@@ -227,6 +229,8 @@ export default function App() {
    */
   const processUtterance = async (command: string) => {
     if (voiceTimeoutRef.current) clearTimeout(voiceTimeoutRef.current);
+    if (silenceDebounceRef.current) clearTimeout(silenceDebounceRef.current);
+    latestTranscriptRef.current = '';
 
     setTranscript(command);
     setOrbMode('executing');
@@ -303,6 +307,7 @@ export default function App() {
     const text = event.results[0]?.transcript;
     if (text && text.trim()) {
       setTranscript(text);
+      latestTranscriptRef.current = text.trim();
 
       const isManual = isManualListeningRef.current;
       const hasWakeWord = /\b(hey|ok|okay|hi|hello)?\s*ora\b/i.test(text);
@@ -312,10 +317,26 @@ export default function App() {
           setOrbMode('listening');
         }
 
+        // Reset silence timer on every new speech token
+        if (silenceDebounceRef.current) clearTimeout(silenceDebounceRef.current);
+
         if (event.isFinal) {
           isManualListeningRef.current = false;
           if (manualListeningTimerRef.current) clearTimeout(manualListeningTimerRef.current);
-          processUtterance(text);
+          const toExecute = latestTranscriptRef.current;
+          latestTranscriptRef.current = '';
+          processUtterance(toExecute);
+        } else {
+          // If Android continuous recognition doesn't dispatch isFinal, auto-trigger after 1100ms of user silence
+          silenceDebounceRef.current = setTimeout(() => {
+            if (latestTranscriptRef.current) {
+              isManualListeningRef.current = false;
+              if (manualListeningTimerRef.current) clearTimeout(manualListeningTimerRef.current);
+              const toExecute = latestTranscriptRef.current;
+              latestTranscriptRef.current = '';
+              processUtterance(toExecute);
+            }
+          }, 1100);
         }
       }
     }
@@ -342,6 +363,18 @@ export default function App() {
   });
 
   useSpeechRecognitionEvent('end', () => {
+    if (silenceDebounceRef.current) clearTimeout(silenceDebounceRef.current);
+
+    // If there is an unprocessed transcript when speech ends, execute it immediately
+    if (latestTranscriptRef.current) {
+      isManualListeningRef.current = false;
+      if (manualListeningTimerRef.current) clearTimeout(manualListeningTimerRef.current);
+      const toExecute = latestTranscriptRef.current;
+      latestTranscriptRef.current = '';
+      processUtterance(toExecute);
+      return;
+    }
+
     // If Ora is speaking, do not restart yet; the speech listener will restart once TTS completes
     if (oraActions.isSpeaking()) {
       return;
@@ -365,10 +398,12 @@ export default function App() {
 
   const handleOrbPress = async () => {
     if (voiceTimeoutRef.current) clearTimeout(voiceTimeoutRef.current);
+    if (silenceDebounceRef.current) clearTimeout(silenceDebounceRef.current);
 
     if (orbMode === 'listening' || orbMode === 'executing') {
       // User tapped to cancel / interrupt
       isManualListeningRef.current = false;
+      latestTranscriptRef.current = '';
       if (manualListeningTimerRef.current) clearTimeout(manualListeningTimerRef.current);
       try {
         await ExpoSpeechRecognitionModule.stop();
@@ -379,6 +414,7 @@ export default function App() {
 
     // User tapped to speak a direct command (Google Assistant mic style)
     isManualListeningRef.current = true;
+    latestTranscriptRef.current = '';
     setTranscript('');
     setOrbMode('listening');
 
@@ -387,19 +423,18 @@ export default function App() {
     manualListeningTimerRef.current = setTimeout(() => {
       if (isManualListeningRef.current) {
         isManualListeningRef.current = false;
+        latestTranscriptRef.current = '';
         setOrbMode('idle');
       }
     }, 6000);
 
-    // If recognizer is already running in background, it will receive the user's speech directly without ERROR_BUSY
+    // Stop continuous background mode and start dedicated manual command session for immediate response
     try {
-      const state = await ExpoSpeechRecognitionModule.getStateAsync();
-      if (state !== 'recognizing' && state !== 'starting') {
-        await startListeningSession(false);
-      }
-    } catch (e) {
-      await startListeningSession(false);
-    }
+      await ExpoSpeechRecognitionModule.stop();
+    } catch (e) {}
+    setTimeout(() => {
+      startListeningSession(false);
+    }, 80);
   };
 
   const handleSelectQuickCommand = (cmd: string) => {

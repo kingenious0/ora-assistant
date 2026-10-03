@@ -26,20 +26,17 @@ const APP_SCHEMES: Record<string, { scheme?: string; webFallback?: string; andro
   // Messaging & Social
   whatsapp: {
     scheme: 'whatsapp://',
-    webFallback: 'https://web.whatsapp.com',
     androidPackages: ['com.whatsapp', 'com.whatsapp.w4b'],
     label: 'WhatsApp',
   },
   'whatsapp business': {
     scheme: 'whatsapp://',
-    webFallback: 'https://web.whatsapp.com',
     androidPackages: ['com.whatsapp.w4b', 'com.whatsapp'],
     label: 'WhatsApp Business',
   },
   'whatsapp biz': {
     scheme: 'whatsapp://',
-    webFallback: 'https://web.whatsapp.com',
-    androidPackages: ['com.whatsapp.w4b'],
+    androidPackages: ['com.whatsapp.w4b', 'com.whatsapp'],
     label: 'WhatsApp Business',
   },
   snapchat: {
@@ -438,9 +435,30 @@ class OraActionController {
   }
 
   /**
-   * Physical Torch / Flashlight execution via expo-camera enableTorch
+   * Physical Torch / Flashlight execution via native CameraManager or expo-camera fallback
    */
   private async handleFlashlight(targetState: boolean, ctx: ActionContext): Promise<ActionExecutionResult> {
+    const stateText = targetState ? 'on' : 'off';
+
+    // 1. Instant native CameraManager toggle via OraHardware
+    if (Platform.OS === 'android' && OraHardware?.setTorchMode) {
+      try {
+        const nativeSuccess = await OraHardware.setTorchMode(targetState);
+        if (nativeSuccess) {
+          ctx.setTorch(targetState);
+          return {
+            success: true,
+            pillText: targetState ? '⚡ Flashlight On' : '⚡ Flashlight Off',
+            spokenConfirmation: `Flashlight turned ${stateText}.`,
+            intentAction: 'toggle_flashlight',
+          };
+        }
+      } catch (e) {
+        console.warn('[OraActions] Native torch error, trying fallback:', e);
+      }
+    }
+
+    // 2. CameraView fallback
     const hasPermission = await ctx.requestCameraPermission();
     if (!hasPermission) {
       return {
@@ -452,7 +470,6 @@ class OraActionController {
     }
 
     ctx.setTorch(targetState);
-    const stateText = targetState ? 'on' : 'off';
 
     return {
       success: true,

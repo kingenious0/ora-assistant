@@ -1,0 +1,7 @@
+{
+  "name": "ora-launcher",
+  "version": "1.0.0",
+  "description": "App launcher for Ora Assistant",
+  "main": "index.ts",
+  "types": "index.d.ts"
+}

@@ -1,0 +1,7 @@
+{
+  "name": "ora-hardware",
+  "version": "1.0.0",
+  "description": "Hardware and system services for Ora Assistant",
+  "main": "index.ts",
+  "types": "index.d.ts"
+}

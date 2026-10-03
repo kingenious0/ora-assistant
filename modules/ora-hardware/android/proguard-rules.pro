@@ -1,0 +1,5 @@
+-keep class com.hex8.ora.services.** { *; }
+-keep class com.hex8.ora.hardware.** { *; }
+-keep class com.hex8.ora.telephony.** { *; }
+-keep class com.hex8.ora.launcher.** { *; }
+-keep class com.hex8.ora.notifications.** { *; }

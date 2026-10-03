@@ -1,0 +1,20 @@
+plugins {
+  id 'com.android.library'
+  id 'expo-module-gradle-plugin'
+}
+
+group = 'com.hex8.ora.telephony'
+
+def packageJson = new groovy.json.JsonSlurper().parseText(file('../package.json').text)
+version = packageJson.version
+
+android {
+  namespace "com.hex8.ora.telephony"
+  defaultConfig {
+    versionCode 1
+    versionName packageJson.version
+  }
+  lintOptions {
+    abortOnError false
+  }
+}

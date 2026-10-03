@@ -1,0 +1,7 @@
+{
+  "name": "ora-telephony",
+  "version": "1.0.0",
+  "description": "Native telephony, direct dialing and SMS for Ora Assistant",
+  "main": "index.ts",
+  "types": "index.d.ts"
+}

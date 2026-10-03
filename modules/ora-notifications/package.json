@@ -1,0 +1,7 @@
+{
+  "name": "ora-notifications",
+  "version": "1.0.0",
+  "description": "Native notification listener and remote reply for Ora Assistant",
+  "main": "index.ts",
+  "types": "index.d.ts"
+}

@@ -192,22 +192,107 @@ class OraVoiceInteractionSession(context: Context) : VoiceInteractionSession(con
     startListening()
   }
 
+  private var audioFocusRequest: android.media.AudioFocusRequest? = null
+
+  private fun acquireAudioFocus(): Boolean {
+    return try {
+      val audioManager = context.getSystemService(Context.AUDIO_SERVICE) as? android.media.AudioManager ?: return false
+      if (android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.O) {
+        val playbackAttributes = android.media.AudioAttributes.Builder()
+          .setUsage(android.media.AudioAttributes.USAGE_ASSISTANT)
+          .setContentType(android.media.AudioAttributes.CONTENT_TYPE_SPEECH)
+          .build()
+        val request = android.media.AudioFocusRequest.Builder(android.media.AudioManager.AUDIOFOCUS_GAIN_TRANSIENT_EXCLUSIVE)
+          .setAudioAttributes(playbackAttributes)
+          .setAcceptsDelayedFocusGain(false)
+          .setOnAudioFocusChangeListener { /* focus change handler */ }
+          .build()
+        audioFocusRequest = request
+        audioManager.requestAudioFocus(request) == android.media.AudioManager.AUDIOFOCUS_REQUEST_GRANTED
+      } else {
+        @Suppress("DEPRECATION")
+        audioManager.requestAudioFocus(
+          null,
+          android.media.AudioManager.STREAM_VOICE_CALL,
+          android.media.AudioManager.AUDIOFOCUS_GAIN_TRANSIENT_EXCLUSIVE
+        ) == android.media.AudioManager.AUDIOFOCUS_REQUEST_GRANTED
+      }
+    } catch (e: Exception) {
+      android.util.Log.w("OraVoiceSession", "Failed to acquire audio focus: ${e.message}")
+      false
+    }
+  }
+
+  private fun releaseAudioFocus() {
+    try {
+      val audioManager = context.getSystemService(Context.AUDIO_SERVICE) as? android.media.AudioManager ?: return
+      if (android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.O) {
+        audioFocusRequest?.let { audioManager.abandonAudioFocusRequest(it) }
+        audioFocusRequest = null
+      } else {
+        @Suppress("DEPRECATION")
+        audioManager.abandonAudioFocus(null)
+      }
+    } catch (e: Exception) {
+      android.util.Log.w("OraVoiceSession", "Failed to release audio focus: ${e.message}")
+    }
+  }
+
+  private fun createNonSelfSpeechRecognizer(): SpeechRecognizer? {
+    val myPkg = context.packageName
+    val candidates = listOf(
+      android.content.ComponentName("com.google.android.tts", "com.google.android.apps.speech.tts.googletts.service.GoogleRecognitionService"),
+      android.content.ComponentName("com.google.android.googlequicksearchbox", "com.google.android.voicesearch.serviceapi.GoogleRecognitionService"),
+      android.content.ComponentName("com.xiaomi.mibrain.speech", "com.xiaomi.mibrain.speech.RecognitionService")
+    )
+
+    for (comp in candidates) {
+      try {
+        val ri = context.packageManager.resolveService(Intent(RecognitionService.SERVICE_INTERFACE).setComponent(comp), 0)
+        if (ri != null) {
+          android.util.Log.i("OraVoiceSession", "Binding SpeechRecognizer to ComponentName: $comp")
+          return SpeechRecognizer.createSpeechRecognizer(context, comp)
+        }
+      } catch (_: Exception) {}
+    }
+
+    try {
+      val intent = Intent(RecognitionService.SERVICE_INTERFACE)
+      val services = context.packageManager.queryIntentServices(intent, 0)
+      for (service in services) {
+        val pkg = service.serviceInfo.packageName
+        if (pkg != myPkg) {
+          val comp = android.content.ComponentName(pkg, service.serviceInfo.name)
+          android.util.Log.i("OraVoiceSession", "Binding SpeechRecognizer to fallback service: $comp")
+          return SpeechRecognizer.createSpeechRecognizer(context, comp)
+        }
+      }
+    } catch (e: Exception) {
+      android.util.Log.w("OraVoiceSession", "Error querying non-self speech services: ${e.message}")
+    }
+
+    return null
+  }
+
   private fun startListening() {
     mainHandler.post {
       try {
-        if (!SpeechRecognizer.isRecognitionAvailable(context)) {
+        acquireAudioFocus()
+
+        speechRecognizer?.destroy()
+        val recognizer = createNonSelfSpeechRecognizer()
+        if (recognizer == null) {
           statusTextView?.text = "Speech service unavailable"
           return@post
         }
-
-        speechRecognizer?.destroy()
-        speechRecognizer = SpeechRecognizer.createSpeechRecognizer(context)
+        speechRecognizer = recognizer
 
         val intent = Intent(RecognizerIntent.ACTION_RECOGNIZE_SPEECH).apply {
           putExtra(RecognizerIntent.EXTRA_LANGUAGE_MODEL, RecognizerIntent.LANGUAGE_MODEL_FREE_FORM)
           putExtra(RecognizerIntent.EXTRA_LANGUAGE, "en-US")
           putExtra(RecognizerIntent.EXTRA_PARTIAL_RESULTS, true)
           putExtra(RecognizerIntent.EXTRA_MAX_RESULTS, 3)
+          putExtra(RecognizerIntent.EXTRA_PREFER_OFFLINE, true)
         }
 
         speechRecognizer?.setRecognitionListener(object : RecognitionListener {
@@ -234,12 +319,27 @@ class OraVoiceInteractionSession(context: Context) : VoiceInteractionSession(con
           }
 
           override fun onError(error: Int) {
+            val errorLabel = when (error) {
+              SpeechRecognizer.ERROR_AUDIO -> "ERROR_AUDIO (3)"
+              SpeechRecognizer.ERROR_CLIENT -> "ERROR_CLIENT (5)"
+              SpeechRecognizer.ERROR_INSUFFICIENT_PERMISSIONS -> "ERROR_INSUFFICIENT_PERMISSIONS (9)"
+              SpeechRecognizer.ERROR_NETWORK -> "ERROR_NETWORK (2)"
+              SpeechRecognizer.ERROR_NETWORK_TIMEOUT -> "ERROR_NETWORK_TIMEOUT (1)"
+              SpeechRecognizer.ERROR_NO_MATCH -> "ERROR_NO_MATCH (7)"
+              SpeechRecognizer.ERROR_RECOGNIZER_BUSY -> "ERROR_RECOGNIZER_BUSY (8)"
+              SpeechRecognizer.ERROR_SERVER -> "ERROR_SERVER (4)"
+              SpeechRecognizer.ERROR_SPEECH_TIMEOUT -> "ERROR_SPEECH_TIMEOUT (6)"
+              else -> "ERROR_UNKNOWN ($error)"
+            }
+            android.util.Log.w("OraVoiceSession", "SpeechRecognizer error: $errorLabel")
             orbView?.scaleX = 1.0f
             orbView?.scaleY = 1.0f
             statusTextView?.text = "Tap orb or say a command"
+            releaseAudioFocus()
           }
 
           override fun onResults(results: Bundle?) {
+            releaseAudioFocus()
             orbView?.scaleX = 1.0f
             orbView?.scaleY = 1.0f
             val matches = results?.getStringArrayList(SpeechRecognizer.RESULTS_RECOGNITION)
@@ -264,7 +364,9 @@ class OraVoiceInteractionSession(context: Context) : VoiceInteractionSession(con
 
         speechRecognizer?.startListening(intent)
       } catch (e: Exception) {
+        android.util.Log.e("OraVoiceSession", "Exception in startListening", e)
         statusTextView?.text = "Tap orb to speak"
+        releaseAudioFocus()
       }
     }
   }
@@ -288,6 +390,7 @@ class OraVoiceInteractionSession(context: Context) : VoiceInteractionSession(con
   override fun onHide() {
     super.onHide()
     try {
+      releaseAudioFocus()
       speechRecognizer?.stopListening()
       speechRecognizer?.destroy()
       speechRecognizer = null

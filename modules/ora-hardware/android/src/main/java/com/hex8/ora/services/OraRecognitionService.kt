@@ -32,9 +32,70 @@ class OraRecognitionService : RecognitionService() {
     )
   }
 
+  private var audioFocusRequest: android.media.AudioFocusRequest? = null
+
+  private fun acquireAudioFocus(): Boolean {
+    return try {
+      val audioManager = applicationContext.getSystemService(Context.AUDIO_SERVICE) as? android.media.AudioManager ?: return false
+      if (android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.O) {
+        val playbackAttributes = android.media.AudioAttributes.Builder()
+          .setUsage(android.media.AudioAttributes.USAGE_ASSISTANT)
+          .setContentType(android.media.AudioAttributes.CONTENT_TYPE_SPEECH)
+          .build()
+        val request = android.media.AudioFocusRequest.Builder(android.media.AudioManager.AUDIOFOCUS_GAIN_TRANSIENT_EXCLUSIVE)
+          .setAudioAttributes(playbackAttributes)
+          .setAcceptsDelayedFocusGain(false)
+          .build()
+        audioFocusRequest = request
+        audioManager.requestAudioFocus(request) == android.media.AudioManager.AUDIOFOCUS_REQUEST_GRANTED
+      } else {
+        @Suppress("DEPRECATION")
+        audioManager.requestAudioFocus(
+          null,
+          android.media.AudioManager.STREAM_VOICE_CALL,
+          android.media.AudioManager.AUDIOFOCUS_GAIN_TRANSIENT_EXCLUSIVE
+        ) == android.media.AudioManager.AUDIOFOCUS_REQUEST_GRANTED
+      }
+    } catch (e: Exception) {
+      Log.w(TAG, "Failed to acquire audio focus: ${e.message}")
+      false
+    }
+  }
+
+  private fun releaseAudioFocus() {
+    try {
+      val audioManager = applicationContext.getSystemService(Context.AUDIO_SERVICE) as? android.media.AudioManager ?: return
+      if (android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.O) {
+        audioFocusRequest?.let { audioManager.abandonAudioFocusRequest(it) }
+        audioFocusRequest = null
+      } else {
+        @Suppress("DEPRECATION")
+        audioManager.abandonAudioFocus(null)
+      }
+    } catch (e: Exception) {
+      Log.w(TAG, "Failed to release audio focus: ${e.message}")
+    }
+  }
+
   private fun createDelegate(): SpeechRecognizer? {
     val ctx = applicationContext
     val myPkg = ctx.packageName
+
+    // 0. Explicitly try trusted system on-device speech engines via ComponentName
+    val explicitComponents = listOf(
+      android.content.ComponentName("com.google.android.tts", "com.google.android.apps.speech.tts.googletts.service.GoogleRecognitionService"),
+      android.content.ComponentName("com.google.android.googlequicksearchbox", "com.google.android.voicesearch.serviceapi.GoogleRecognitionService"),
+      android.content.ComponentName("com.xiaomi.mibrain.speech", "com.xiaomi.mibrain.speech.RecognitionService")
+    )
+    for (comp in explicitComponents) {
+      try {
+        val ri = ctx.packageManager.resolveService(Intent(RecognitionService.SERVICE_INTERFACE).setComponent(comp), 0)
+        if (ri != null) {
+          Log.i(TAG, "Binding delegate recognizer to explicit ComponentName: $comp")
+          return SpeechRecognizer.createSpeechRecognizer(ctx, comp)
+        }
+      } catch (_: Exception) {}
+    }
 
     // 1. Discover available system recognition services, explicitly filtering out self to prevent circular loop
     try {
@@ -84,10 +145,12 @@ class OraRecognitionService : RecognitionService() {
 
     mainHandler.post {
       try {
+        acquireAudioFocus()
         delegateRecognizer?.destroy()
         val recognizer = createDelegate()
         if (recognizer == null) {
           Log.e(TAG, "Could not create delegate speech recognizer")
+          releaseAudioFocus()
           listener?.error(SpeechRecognizer.ERROR_CLIENT)
           return@post
         }
@@ -115,12 +178,26 @@ class OraRecognitionService : RecognitionService() {
             }
 
             override fun onError(error: Int) {
-              Log.w(TAG, "Delegate recognizer error: $error")
+              val errorLabel = when (error) {
+                SpeechRecognizer.ERROR_AUDIO -> "ERROR_AUDIO (3)"
+                SpeechRecognizer.ERROR_CLIENT -> "ERROR_CLIENT (5)"
+                SpeechRecognizer.ERROR_INSUFFICIENT_PERMISSIONS -> "ERROR_INSUFFICIENT_PERMISSIONS (9)"
+                SpeechRecognizer.ERROR_NETWORK -> "ERROR_NETWORK (2)"
+                SpeechRecognizer.ERROR_NETWORK_TIMEOUT -> "ERROR_NETWORK_TIMEOUT (1)"
+                SpeechRecognizer.ERROR_NO_MATCH -> "ERROR_NO_MATCH (7)"
+                SpeechRecognizer.ERROR_RECOGNIZER_BUSY -> "ERROR_RECOGNIZER_BUSY (8)"
+                SpeechRecognizer.ERROR_SERVER -> "ERROR_SERVER (4)"
+                SpeechRecognizer.ERROR_SPEECH_TIMEOUT -> "ERROR_SPEECH_TIMEOUT (6)"
+                else -> "ERROR_UNKNOWN ($error)"
+              }
+              Log.w(TAG, "Delegate recognizer error: $errorLabel")
+              releaseAudioFocus()
               currentListener?.error(error)
             }
 
             override fun onResults(results: Bundle?) {
               Log.i(TAG, "Delegate recognizer results received")
+              releaseAudioFocus()
               currentListener?.results(results)
             }
 
@@ -143,6 +220,7 @@ class OraRecognitionService : RecognitionService() {
         }
       } catch (e: Exception) {
         Log.e(TAG, "Failed to start delegate speech recognizer", e)
+        releaseAudioFocus()
         listener?.error(SpeechRecognizer.ERROR_CLIENT)
       }
     }
@@ -151,6 +229,7 @@ class OraRecognitionService : RecognitionService() {
   override fun onCancel(listener: Callback?) {
     mainHandler.post {
       try {
+        releaseAudioFocus()
         delegateRecognizer?.cancel()
       } catch (e: Exception) {
         Log.w(TAG, "Error cancelling recognizer: ${e.message}")
@@ -161,6 +240,7 @@ class OraRecognitionService : RecognitionService() {
   override fun onStopListening(listener: Callback?) {
     mainHandler.post {
       try {
+        releaseAudioFocus()
         delegateRecognizer?.stopListening()
       } catch (e: Exception) {
         Log.w(TAG, "Error stopping recognizer: ${e.message}")
@@ -172,6 +252,7 @@ class OraRecognitionService : RecognitionService() {
     super.onDestroy()
     mainHandler.post {
       try {
+        releaseAudioFocus()
         delegateRecognizer?.destroy()
         delegateRecognizer = null
       } catch (e: Exception) {}

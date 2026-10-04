@@ -33,7 +33,7 @@ import {
 } from 'expo-speech-recognition';
 import { contactsService, DisambiguationContext } from './src/services/contactsService';
 import { foregroundVoiceManager } from './src/services/foregroundService';
-import { speechEngine } from './src/services/speechEngine';
+import { speechEngine, parseSpeechError } from './src/services/speechEngine';
 import { requireNativeModule } from 'expo-modules-core';
 
 let OraHardware: any = null;
@@ -134,6 +134,7 @@ export default function App() {
   const manualListeningTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const latestTranscriptRef = useRef<string>('');
   const silenceDebounceRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const failoverCountRef = useRef<number>(0);
 
   // Sync real-time contacts count and dialogue disambiguation context from cache
   useEffect(() => {
@@ -189,27 +190,37 @@ export default function App() {
     };
   }, []);
 
-  // Request core native permissions on mount (excluding high-risk SMS to prevent MIUI security block)
+  // Request core native permissions sequentially on mount so OS dialogs display cleanly
   useEffect(() => {
-    if (!permission?.granted) {
-      requestPermission().catch(() => {});
-    }
+    const initAppPermissions = async () => {
+      try {
+        if (Platform.OS === 'android') {
+          // 1. Audio permission via Expo Speech Recognition (ensures native dialog shows)
+          try {
+            await ExpoSpeechRecognitionModule.requestPermissionsAsync();
+          } catch (_) {}
 
-    if (Platform.OS === 'android') {
-      PermissionsAndroid.requestMultiple([
-        PermissionsAndroid.PERMISSIONS.RECORD_AUDIO,
-        PermissionsAndroid.PERMISSIONS.READ_CONTACTS,
-        PermissionsAndroid.PERMISSIONS.CALL_PHONE,
-        PermissionsAndroid.PERMISSIONS.SEND_SMS,
-      ]).then(() => {
+          // 2. Request core Android runtime permissions sequentially
+          const perms: any[] = [
+            PermissionsAndroid.PERMISSIONS.RECORD_AUDIO,
+            PermissionsAndroid.PERMISSIONS.READ_CONTACTS,
+            PermissionsAndroid.PERMISSIONS.CALL_PHONE,
+            PermissionsAndroid.PERMISSIONS.SEND_SMS,
+          ];
+          if (Platform.Version >= 33) {
+            perms.push('android.permission.POST_NOTIFICATIONS' as any);
+          }
+          await PermissionsAndroid.requestMultiple(perms);
+        }
+        await contactsService.loadContacts();
+      } catch (err) {
+        console.warn('[App] Startup permission error:', err);
         contactsService.loadContacts().catch(() => {});
-      }).catch(() => {
-        contactsService.loadContacts().catch(() => {});
-      });
-    } else {
-      contactsService.loadContacts().catch(() => {});
-    }
-  }, [permission]);
+      }
+    };
+
+    initAppPermissions();
+  }, []);
 
   // ACOUSTIC ECHO SUPPRESSION:
   // When Ora speaks via TTS, immediately stop speech recognition so Ora never hears its own voice.
@@ -279,13 +290,15 @@ export default function App() {
   };
 
   /**
-   * Continuous hands-free auto-listener loop when idle
+   * Continuous hands-free auto-listener loop when strictly idle
    */
   useEffect(() => {
-    if (isHandsFree) {
+    if (isHandsFree && orbMode === 'idle' && !isManualListeningRef.current) {
       const timer = setTimeout(() => {
-        startListeningSession(true);
-      }, 700);
+        if (isHandsFree && orbMode === 'idle' && !isManualListeningRef.current && !oraActions.isSpeaking()) {
+          startListeningSession(true);
+        }
+      }, 800);
       return () => clearTimeout(timer);
     }
   }, [isHandsFree, orbMode]);
@@ -446,45 +459,39 @@ export default function App() {
   });
 
   useSpeechRecognitionEvent('error', (event) => {
-    const err = event.error;
-    const msg = event.message || '';
-    console.warn('[Speech] recognition error event:', err, msg);
+    const parsed = parseSpeechError(event);
+    console.warn(`[Speech] Recognition error: ${parsed.name} (${parsed.code}) - ${parsed.description}`, event);
 
     // If transient silence timeout, don't abort manual listening window early
-    if (err === 'no-speech') {
+    if (parsed.name === 'ERROR_SPEECH_TIMEOUT' || event.error === 'no-speech') {
       if (isManualListeningRef.current) {
         return;
       }
     }
 
-    // If engine is busy from previous uncleaned session, cleanly abort and retry
-    if (err === 'busy') {
-      try {
-        ExpoSpeechRecognitionModule.abort();
-      } catch (_) {}
-      if (isManualListeningRef.current) {
-        setTimeout(() => {
-          if (isManualListeningRef.current) {
-            startListeningSession(false);
-          }
-        }, 150);
+    // Task A: NEVER automatically call start() inside error block if error is
+    // ERROR_CLIENT (5), ERROR_RECOGNIZER_BUSY (8), ERROR_AUDIO (3), or an abort event!
+    if (parsed.isFatalForRetry || event.error === 'busy' || event.error === 'aborted') {
+      console.warn(`[Speech] Fatal / contention error detected (${parsed.name}). Terminating session without loop.`);
+      isManualListeningRef.current = false;
+      if (manualListeningTimerRef.current) clearTimeout(manualListeningTimerRef.current);
+      if (orbMode === 'listening') {
+        setOrbMode('idle');
       }
+      showActionPill(`Mic: ${parsed.name}`);
       return;
     }
 
-    // Engine Failover: If current speech recognition engine throws an error
-    // (e.g. language-not-supported on missing 62MB pack, or client/audio-capture/network),
-    // automatically cycle to the next installed speech engine on the device!
-    if (isManualListeningRef.current || orbMode === 'listening') {
+    // Controlled Single Failover: Allow at most 1 package failover per manual interaction
+    if ((isManualListeningRef.current || orbMode === 'listening') && failoverCountRef.current < 1) {
+      failoverCountRef.current += 1;
       const candidates = speechEngine.getCandidatePackages();
       if (candidates.length > 1) {
         const nextPkg = speechEngine.cycleNextPackage();
-        console.log(`[Speech] Engine failed with "${err}". Trying next provider: ${nextPkg || 'default'}`);
-        try {
-          ExpoSpeechRecognitionModule.abort();
-        } catch (_) {}
-        setTimeout(() => {
+        console.log(`[Speech] Recoverable error "${parsed.name}". Trying backup provider: ${nextPkg || 'default'}`);
+        setTimeout(async () => {
           if (isManualListeningRef.current || orbMode === 'listening') {
+            await speechEngine.stopAndCooldown(200);
             startListeningSession(false, nextPkg);
           }
         }, 200);
@@ -492,7 +499,7 @@ export default function App() {
       }
     }
 
-    // If all failovers exhausted or non-recoverable error
+    // If all failovers exhausted or general error
     if (isManualListeningRef.current) {
       isManualListeningRef.current = false;
       if (manualListeningTimerRef.current) clearTimeout(manualListeningTimerRef.current);
@@ -502,10 +509,10 @@ export default function App() {
       setOrbMode('idle');
     }
 
-    if (err === 'network') {
+    if (event.error === 'network') {
       showActionPill('Offline Recognition Active');
-    } else if (err !== 'no-speech') {
-      showActionPill(`Mic: ${err}`);
+    } else {
+      showActionPill(`Mic: ${parsed.name}`);
     }
   });
 
@@ -527,17 +534,22 @@ export default function App() {
       return;
     }
 
-    // If the user tapped the mic and is still in their manual listening window, keep the recognizer alive
+    // Task A: When manual listening ends without speech, cleanly transition to idle without loops
     if (isManualListeningRef.current) {
-      startListeningSession(false);
+      isManualListeningRef.current = false;
+      if (manualListeningTimerRef.current) clearTimeout(manualListeningTimerRef.current);
+      setOrbMode('idle');
       return;
     }
 
-    if (isHandsFree && orbMode === 'idle') {
+    // If hands-free is enabled and system is idle, enforce a 300ms grace period before re-engaging
+    if (isHandsFree && orbMode === 'idle' && !isManualListeningRef.current) {
       if (handsFreeRestartRef.current) clearTimeout(handsFreeRestartRef.current);
       handsFreeRestartRef.current = setTimeout(() => {
-        startListeningSession(true);
-      }, 600);
+        if (isHandsFree && orbMode === 'idle' && !isManualListeningRef.current && !oraActions.isSpeaking()) {
+          startListeningSession(true);
+        }
+      }, 300);
     } else if (orbMode === 'listening') {
       setOrbMode('idle');
     }
@@ -546,21 +558,21 @@ export default function App() {
   const handleOrbPress = async () => {
     if (voiceTimeoutRef.current) clearTimeout(voiceTimeoutRef.current);
     if (silenceDebounceRef.current) clearTimeout(silenceDebounceRef.current);
+    if (handsFreeRestartRef.current) clearTimeout(handsFreeRestartRef.current);
 
     if (orbMode === 'listening' || orbMode === 'executing') {
       // User tapped to cancel / interrupt
       isManualListeningRef.current = false;
       latestTranscriptRef.current = '';
       if (manualListeningTimerRef.current) clearTimeout(manualListeningTimerRef.current);
-      try {
-        ExpoSpeechRecognitionModule.abort();
-      } catch (e) {}
+      await speechEngine.stopAndCooldown(150);
       setOrbMode('idle');
       return;
     }
 
-    // User tapped to speak a direct command (Google Assistant mic style)
+    // Task A: Strict Audio Session Handshake for Manual Tap
     isManualListeningRef.current = true;
+    failoverCountRef.current = 0;
     latestTranscriptRef.current = '';
     setTranscript('');
     setOrbMode('listening');
@@ -568,6 +580,9 @@ export default function App() {
 
     // Reset provider index to top candidate on new manual tap
     speechEngine.resetPackageIndex();
+
+    // Mandatory Hardware Cooldown Delay (150-200ms) to allow HAL to clear recording stream
+    await speechEngine.stopAndCooldown(200);
 
     // Safe auto-timeout if user taps orb but never speaks
     if (manualListeningTimerRef.current) clearTimeout(manualListeningTimerRef.current);
@@ -579,7 +594,7 @@ export default function App() {
       }
     }, 8000);
 
-    // Launch speech session cleanly through speechEngine
+    // Launch single-shot manual speech session cleanly
     startListeningSession(false);
   };
 

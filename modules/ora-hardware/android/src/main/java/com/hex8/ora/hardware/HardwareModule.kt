@@ -31,11 +31,28 @@ class HardwareModule : Module() {
 
     AsyncFunction("setTorchMode") { enabled: Boolean ->
       val context = appContext.reactContext ?: return@AsyncFunction false
-      val cameraManager = context.getSystemService(Context.CAMERA_SERVICE) as? CameraManager
+      val cameraManager = context.getSystemService(Context.CAMERA_SERVICE) as? CameraManager ?: return@AsyncFunction false
       try {
-        val cameraId = cameraManager?.cameraIdList?.firstOrNull() ?: return@AsyncFunction false
-        cameraManager.setTorchMode(cameraId, enabled)
-        true
+        var targetCameraId: String? = null
+        for (id in cameraManager.cameraIdList) {
+          try {
+            val chars = cameraManager.getCameraCharacteristics(id)
+            val hasFlash = chars.get(android.hardware.camera2.CameraCharacteristics.FLASH_INFO_AVAILABLE) ?: false
+            val facing = chars.get(android.hardware.camera2.CameraCharacteristics.LENS_FACING)
+            if (hasFlash && facing == android.hardware.camera2.CameraCharacteristics.LENS_FACING_BACK) {
+              targetCameraId = id
+              break
+            } else if (hasFlash && targetCameraId == null) {
+              targetCameraId = id
+            }
+          } catch (ignored: Exception) {}
+        }
+        if (targetCameraId != null) {
+          cameraManager.setTorchMode(targetCameraId, enabled)
+          true
+        } else {
+          false
+        }
       } catch (e: Exception) {
         false
       }

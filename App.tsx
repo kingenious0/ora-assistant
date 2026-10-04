@@ -228,19 +228,22 @@ export default function App() {
         return;
       }
 
-      // Check available recognition service packages
+      // Check current engine state before launching to avoid busy conflicts
+      try {
+        const state = await ExpoSpeechRecognitionModule.getStateAsync();
+        if (state !== 'inactive') {
+          ExpoSpeechRecognitionModule.abort();
+          await new Promise((r) => setTimeout(r, 120));
+        }
+      } catch (e) {}
+
+      // On Android, retrieve the system's preferred/configured recognition service dynamically
       let preferredPackage: string | undefined;
       if (Platform.OS === 'android') {
         try {
-          const services = ExpoSpeechRecognitionModule.getSpeechRecognitionServices();
-          if (Array.isArray(services) && services.length > 0) {
-            if (services.includes('com.google.android.googlequicksearchbox')) {
-              preferredPackage = 'com.google.android.googlequicksearchbox';
-            } else if (services.includes('com.google.android.tts')) {
-              preferredPackage = 'com.google.android.tts';
-            } else if (services.includes('com.google.android.as')) {
-              preferredPackage = 'com.google.android.as';
-            }
+          const defaultService = ExpoSpeechRecognitionModule.getDefaultRecognitionService();
+          if (defaultService?.packageName) {
+            preferredPackage = defaultService.packageName;
           }
         } catch (e) {}
       }
@@ -251,8 +254,8 @@ export default function App() {
         continuous,
         androidRecognitionServicePackage: preferredPackage,
       });
-    } catch (e) {
-      // Audio engine busy or restarting
+    } catch (e: any) {
+      console.warn('[Speech] Start session error:', e?.message || e);
     }
   };
 
@@ -395,6 +398,21 @@ export default function App() {
     }
   });
 
+  useSpeechRecognitionEvent('volumechange', (event) => {
+    // Reset manual listening timeout when speech audio volume is detected
+    if (event.value > 1 && isManualListeningRef.current) {
+      if (manualListeningTimerRef.current) {
+        clearTimeout(manualListeningTimerRef.current);
+        manualListeningTimerRef.current = setTimeout(() => {
+          if (isManualListeningRef.current) {
+            isManualListeningRef.current = false;
+            setOrbMode('idle');
+          }
+        }, 6000);
+      }
+    }
+  });
+
   useSpeechRecognitionEvent('error', (event) => {
     const err = event.error;
     if (err !== 'no-speech' && err !== 'busy') {
@@ -459,7 +477,7 @@ export default function App() {
       latestTranscriptRef.current = '';
       if (manualListeningTimerRef.current) clearTimeout(manualListeningTimerRef.current);
       try {
-        await ExpoSpeechRecognitionModule.stop();
+        ExpoSpeechRecognitionModule.abort();
       } catch (e) {}
       setOrbMode('idle');
       return;
@@ -470,6 +488,7 @@ export default function App() {
     latestTranscriptRef.current = '';
     setTranscript('');
     setOrbMode('listening');
+    showActionPill('Listening... Speak now');
 
     // Safe auto-timeout if user taps orb but never speaks
     if (manualListeningTimerRef.current) clearTimeout(manualListeningTimerRef.current);
@@ -479,15 +498,15 @@ export default function App() {
         latestTranscriptRef.current = '';
         setOrbMode('idle');
       }
-    }, 6000);
+    }, 7000);
 
-    // Stop continuous background mode and start dedicated manual command session for immediate response
+    // Stop continuous background mode and start dedicated manual command session cleanly
     try {
-      await ExpoSpeechRecognitionModule.stop();
+      ExpoSpeechRecognitionModule.abort();
     } catch (e) {}
     setTimeout(() => {
       startListeningSession(false);
-    }, 80);
+    }, 150);
   };
 
   const handleSelectQuickCommand = (cmd: string) => {
@@ -509,8 +528,8 @@ export default function App() {
       <SafeAreaView style={styles.container}>
         <StatusBar barStyle="light-content" backgroundColor="#050508" />
 
-        {/* Hidden physical camera for hardware flashlight control in Expo Go */}
-        {Platform.OS !== 'web' && permission?.granted && (
+        {/* Hidden physical camera for hardware flashlight fallback only on non-Android platforms */}
+        {Platform.OS !== 'web' && Platform.OS !== 'android' && permission?.granted && (
           <CameraView
             style={styles.hiddenCamera}
             enableTorch={isTorchOn}

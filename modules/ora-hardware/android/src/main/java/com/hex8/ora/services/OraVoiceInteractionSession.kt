@@ -1,16 +1,22 @@
 package com.hex8.ora.services
 
+import android.content.ComponentName
 import android.content.Context
 import android.content.Intent
 import android.graphics.Color
 import android.graphics.Typeface
 import android.graphics.drawable.GradientDrawable
+import android.media.AudioAttributes
+import android.media.AudioFocusRequest
+import android.media.AudioManager
 import android.net.Uri
+import android.os.Build
 import android.os.Bundle
 import android.os.Handler
 import android.os.Looper
 import android.service.voice.VoiceInteractionSession
 import android.speech.RecognitionListener
+import android.speech.RecognitionService
 import android.speech.RecognizerIntent
 import android.speech.SpeechRecognizer
 import android.util.TypedValue
@@ -253,7 +259,7 @@ class OraVoiceInteractionSession(context: Context) : VoiceInteractionSession(con
           android.util.Log.i("OraVoiceSession", "Binding SpeechRecognizer to ComponentName: $comp")
           return SpeechRecognizer.createSpeechRecognizer(context, comp)
         }
-      } catch (_: Exception) {}
+      } catch (ignored: Exception) {}
     }
 
     try {

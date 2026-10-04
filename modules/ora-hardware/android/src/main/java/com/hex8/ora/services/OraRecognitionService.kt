@@ -1,7 +1,12 @@
 package com.hex8.ora.services
 
+import android.content.ComponentName
 import android.content.Context
 import android.content.Intent
+import android.media.AudioAttributes
+import android.media.AudioFocusRequest
+import android.media.AudioManager
+import android.os.Build
 import android.os.Bundle
 import android.os.Handler
 import android.os.Looper
@@ -94,7 +99,7 @@ class OraRecognitionService : RecognitionService() {
           Log.i(TAG, "Binding delegate recognizer to explicit ComponentName: $comp")
           return SpeechRecognizer.createSpeechRecognizer(ctx, comp)
         }
-      } catch (_: Exception) {}
+      } catch (ignored: Exception) {}
     }
 
     // 1. Discover available system recognition services, explicitly filtering out self to prevent circular loop

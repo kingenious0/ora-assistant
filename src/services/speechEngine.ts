@@ -8,54 +8,87 @@ import { ExpoSpeechRecognitionModule } from 'expo-speech-recognition';
  */
 class SpeechEngineService {
   private isDownloadingModel: boolean = false;
-  private cachedPreferredPackage: string | null = null;
+  private currentPackageIndex: number = 0;
 
   /**
-   * Resolves the highest-priority native speech recognition package on the device,
-   * prioritizing dedicated on-device/offline recognition engines and explicitly
-   * filtering out Ora itself to prevent circular delegate deadlocks.
+   * Discovers and orders all native speech recognition engines on this device.
+   * Priority:
+   * 1. Google App (com.google.android.googlequicksearchbox) - universally supported and stable
+   * 2. Google Speech Services (com.google.android.tts)
+   * 3. Xiaomi Speech Engine (com.xiaomi.mibrain.speech) - native on HyperOS / MIUI
+   * 4. Samsung Bixby (com.samsung.android.bixby.agent)
+   * 5. Android System Intelligence (com.google.android.as)
+   * Explicitly excludes Ora itself (com.hex8.ora) to prevent circular delegate deadlocks.
    */
-  public getBestRecognitionPackage(): string | undefined {
+  public getCandidatePackages(): (string | undefined)[] {
     if (Platform.OS !== 'android') {
-      return undefined;
+      return [undefined];
     }
 
     try {
-      const allServices = ExpoSpeechRecognitionModule.getSpeechRecognitionServices();
-      if (!Array.isArray(allServices) || allServices.length === 0) {
-        return undefined;
-      }
-
-      // Priority list of on-device & OEM speech providers
-      const priorityPackages = [
-        'com.google.android.as', // Android System Intelligence / Private Compute Core (Best Offline)
-        'com.google.android.tts', // Google Speech Services
-        'com.google.android.googlequicksearchbox', // Google App
-        'com.xiaomi.mibrain.speech', // Xiaomi HyperOS / MIUI Speech Engine
-        'com.samsung.android.bixby.agent', // Samsung Offline Bixby
-      ];
-
-      // Explicitly filter out com.hex8.ora so the app doesn't self-bind
+      const allServices = ExpoSpeechRecognitionModule.getSpeechRecognitionServices() || [];
       const validServices = allServices.filter((pkg) => pkg !== 'com.hex8.ora');
 
+      const priorityPackages = [
+        'com.google.android.googlequicksearchbox',
+        'com.google.android.tts',
+        'com.xiaomi.mibrain.speech',
+        'com.samsung.android.bixby.agent',
+        'com.google.android.as',
+      ];
+
+      const ordered: (string | undefined)[] = [];
+
+      // Add matching priority packages
       for (const priority of priorityPackages) {
-        if (validServices.includes(priority)) {
-          this.cachedPreferredPackage = priority;
-          return priority;
+        if (validServices.includes(priority) && !ordered.includes(priority)) {
+          ordered.push(priority);
         }
       }
 
-      // If no priority package matches, take the first valid non-self package
-      if (validServices.length > 0) {
-        this.cachedPreferredPackage = validServices[0];
-        return validServices[0];
+      // Add any remaining non-self packages
+      for (const service of validServices) {
+        if (!ordered.includes(service)) {
+          ordered.push(service);
+        }
       }
 
-      return undefined;
+      // If no valid packages found, include undefined (system default)
+      if (ordered.length === 0) {
+        ordered.push(undefined);
+      }
+
+      return ordered;
     } catch (e) {
       console.warn('[SpeechEngine] Error resolving recognition services:', e);
-      return undefined;
+      return [undefined];
     }
+  }
+
+  /**
+   * Returns the best candidate package for speech recognition.
+   */
+  public getBestRecognitionPackage(): string | undefined {
+    const candidates = this.getCandidatePackages();
+    return candidates[0];
+  }
+
+  /**
+   * Cycle to next available package if the current one throws an error.
+   */
+  public cycleNextPackage(): string | undefined {
+    const candidates = this.getCandidatePackages();
+    this.currentPackageIndex = (this.currentPackageIndex + 1) % candidates.length;
+    return candidates[this.currentPackageIndex];
+  }
+
+  public getCurrentPackage(): string | undefined {
+    const candidates = this.getCandidatePackages();
+    return candidates[this.currentPackageIndex % candidates.length];
+  }
+
+  public resetPackageIndex(): void {
+    this.currentPackageIndex = 0;
   }
 
   /**
@@ -71,7 +104,7 @@ class SpeechEngineService {
   }
 
   /**
-   * Trigger offline model download in background if on Android 13+
+   * Safe optional background trigger for offline language pack
    */
   public async ensureOfflineModel(locale: string = 'en-US'): Promise<void> {
     if (Platform.OS !== 'android' || this.isDownloadingModel) return;
@@ -81,7 +114,6 @@ class SpeechEngineService {
       const res = await ExpoSpeechRecognitionModule.androidTriggerOfflineModelDownload({ locale });
       console.log('[SpeechEngine] Offline model download status:', res.status, res.message);
     } catch (e: any) {
-      // Non-fatal; device may already have model or is below Android 13
       console.log('[SpeechEngine] Offline model trigger note:', e?.message || e);
     } finally {
       this.isDownloadingModel = false;
@@ -89,10 +121,17 @@ class SpeechEngineService {
   }
 
   /**
-   * Starts a resilient speech recognition session with multi-tier offline fallback.
+   * Starts a resilient speech recognition session.
+   * CRITICAL: We do NOT pass `requiresOnDeviceRecognition: true` by default because
+   * on Android devices (like Xiaomi) without the pre-downloaded 62MB pack,
+   * `requiresOnDeviceRecognition: true` causes Android's SpeechRecognizer to immediately
+   * throw ERROR_LANGUAGE_UNAVAILABLE (13) or ERROR_CLIENT (5) and shut down the microphone!
+   * Instead, we pass `EXTRA_PREFER_OFFLINE: true` via androidIntentOptions, which tells
+   * the recognizer to use on-device models if available, but safely fall back without crashing.
    */
   public async startListening(options: {
     continuous?: boolean;
+    packageOverride?: string;
     onNotice?: (msg: string) => void;
   }): Promise<boolean> {
     try {
@@ -107,52 +146,26 @@ class SpeechEngineService {
         const state = await ExpoSpeechRecognitionModule.getStateAsync();
         if (state !== 'inactive') {
           ExpoSpeechRecognitionModule.abort();
-          await new Promise((r) => setTimeout(r, 100));
+          await new Promise((r) => setTimeout(r, 120));
         }
       } catch (_) {}
 
-      const preferredPkg = this.getBestRecognitionPackage();
-      const offlineSupported = this.supportsOffline();
+      const pkg = options.packageOverride !== undefined ? options.packageOverride : this.getCurrentPackage();
 
-      // Tier 1: Attempt dedicated on-device recognition if supported
-      if (offlineSupported && preferredPkg) {
-        try {
-          await ExpoSpeechRecognitionModule.start({
-            lang: 'en-US',
-            interimResults: true,
-            continuous: options.continuous ?? false,
-            requiresOnDeviceRecognition: true,
-            androidRecognitionServicePackage: preferredPkg,
-          });
-          return true;
-        } catch (onDeviceErr: any) {
-          console.warn('[SpeechEngine] Tier 1 on-device start failed, trying Tier 2 fallback:', onDeviceErr?.message);
-        }
-      }
+      console.log(`[SpeechEngine] Starting recognition with package: ${pkg || 'default system recognizer'}`);
 
-      // Tier 2: Standard recognition with system provider
-      try {
-        // If preferred package was com.google.android.as and Tier 1 failed, use standard recognizer
-        const fallbackPkg = (preferredPkg === 'com.google.android.as') ? undefined : preferredPkg;
-        await ExpoSpeechRecognitionModule.start({
-          lang: 'en-US',
-          interimResults: true,
-          continuous: options.continuous ?? false,
-          requiresOnDeviceRecognition: false,
-          androidRecognitionServicePackage: fallbackPkg,
-        });
-        return true;
-      } catch (tier2Err: any) {
-        console.warn('[SpeechEngine] Tier 2 fallback with package failed, trying default system recognizer:', tier2Err?.message);
-        // Tier 3: Default system recognizer (no package constraint)
-        await ExpoSpeechRecognitionModule.start({
-          lang: 'en-US',
-          interimResults: true,
-          continuous: options.continuous ?? false,
-          requiresOnDeviceRecognition: false,
-        });
-        return true;
-      }
+      await ExpoSpeechRecognitionModule.start({
+        lang: 'en-US',
+        interimResults: true,
+        continuous: options.continuous ?? false,
+        requiresOnDeviceRecognition: false, // Prevents fatal ERROR_LANGUAGE_UNAVAILABLE
+        androidRecognitionServicePackage: pkg,
+        androidIntentOptions: {
+          EXTRA_PREFER_OFFLINE: true, // Offline-preferred intent without hard crash
+        },
+      });
+
+      return true;
     } catch (err: any) {
       console.error('[SpeechEngine] Failed to start recognition session:', err);
       options.onNotice?.(`Speech Error: ${err?.message || 'Failed to start'}`);
@@ -171,3 +184,4 @@ class SpeechEngineService {
 }
 
 export const speechEngine = new SpeechEngineService();
+

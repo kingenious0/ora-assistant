@@ -266,10 +266,11 @@ export default function App() {
   /**
    * Helper to start in-app speech recognition via the Offline Speech Engine Orchestrator
    */
-  const startListeningSession = async (continuous: boolean = false) => {
+  const startListeningSession = async (continuous: boolean = false, packageOverride?: string) => {
     try {
       await speechEngine.startListening({
         continuous,
+        packageOverride,
         onNotice: (msg) => showActionPill(msg),
       });
     } catch (e: any) {
@@ -366,8 +367,24 @@ export default function App() {
 
   // In-App Speech Recognition Event Handlers (Continuous Hands-Free + Mic Trigger)
   useSpeechRecognitionEvent('start', () => {
-    if (orbMode === 'idle') {
-      // Keep quiet/idle until speech or wake word
+    console.log('[Speech] Recognition started');
+    if (isManualListeningRef.current) {
+      if (orbMode !== 'listening') setOrbMode('listening');
+    }
+  });
+
+  useSpeechRecognitionEvent('speechstart', () => {
+    console.log('[Speech] User speech detected');
+    // If user is actively speaking, extend manual listening timeout
+    if (isManualListeningRef.current && manualListeningTimerRef.current) {
+      clearTimeout(manualListeningTimerRef.current);
+      manualListeningTimerRef.current = setTimeout(() => {
+        if (isManualListeningRef.current) {
+          isManualListeningRef.current = false;
+          latestTranscriptRef.current = '';
+          setOrbMode('idle');
+        }
+      }, 7000);
     }
   });
 
@@ -423,32 +440,72 @@ export default function App() {
             isManualListeningRef.current = false;
             setOrbMode('idle');
           }
-        }, 6000);
+        }, 7000);
       }
     }
   });
 
   useSpeechRecognitionEvent('error', (event) => {
     const err = event.error;
-    if (err !== 'no-speech' && err !== 'busy') {
-      console.warn('[Speech] recognition error:', err);
-    }
+    const msg = event.message || '';
+    console.warn('[Speech] recognition error event:', err, msg);
 
-    if (err === 'network') {
-      showActionPill('Offline Recognition Active');
-    }
-
-    // Do NOT abort manual listening window on transient recognizer errors (e.g. busy or no-speech)
-    if (isManualListeningRef.current) {
-      if (err === 'busy' || err === 'no-speech') {
+    // If transient silence timeout, don't abort manual listening window early
+    if (err === 'no-speech') {
+      if (isManualListeningRef.current) {
         return;
       }
+    }
+
+    // If engine is busy from previous uncleaned session, cleanly abort and retry
+    if (err === 'busy') {
+      try {
+        ExpoSpeechRecognitionModule.abort();
+      } catch (_) {}
+      if (isManualListeningRef.current) {
+        setTimeout(() => {
+          if (isManualListeningRef.current) {
+            startListeningSession(false);
+          }
+        }, 150);
+      }
+      return;
+    }
+
+    // Engine Failover: If current speech recognition engine throws an error
+    // (e.g. language-not-supported on missing 62MB pack, or client/audio-capture/network),
+    // automatically cycle to the next installed speech engine on the device!
+    if (isManualListeningRef.current || orbMode === 'listening') {
+      const candidates = speechEngine.getCandidatePackages();
+      if (candidates.length > 1) {
+        const nextPkg = speechEngine.cycleNextPackage();
+        console.log(`[Speech] Engine failed with "${err}". Trying next provider: ${nextPkg || 'default'}`);
+        try {
+          ExpoSpeechRecognitionModule.abort();
+        } catch (_) {}
+        setTimeout(() => {
+          if (isManualListeningRef.current || orbMode === 'listening') {
+            startListeningSession(false, nextPkg);
+          }
+        }, 200);
+        return;
+      }
+    }
+
+    // If all failovers exhausted or non-recoverable error
+    if (isManualListeningRef.current) {
       isManualListeningRef.current = false;
       if (manualListeningTimerRef.current) clearTimeout(manualListeningTimerRef.current);
     }
 
     if (orbMode === 'listening') {
       setOrbMode('idle');
+    }
+
+    if (err === 'network') {
+      showActionPill('Offline Recognition Active');
+    } else if (err !== 'no-speech') {
+      showActionPill(`Mic: ${err}`);
     }
   });
 
@@ -509,6 +566,9 @@ export default function App() {
     setOrbMode('listening');
     showActionPill('Listening... Speak now');
 
+    // Reset provider index to top candidate on new manual tap
+    speechEngine.resetPackageIndex();
+
     // Safe auto-timeout if user taps orb but never speaks
     if (manualListeningTimerRef.current) clearTimeout(manualListeningTimerRef.current);
     manualListeningTimerRef.current = setTimeout(() => {
@@ -517,15 +577,10 @@ export default function App() {
         latestTranscriptRef.current = '';
         setOrbMode('idle');
       }
-    }, 7000);
+    }, 8000);
 
-    // Stop continuous background mode and start dedicated manual command session cleanly
-    try {
-      ExpoSpeechRecognitionModule.abort();
-    } catch (e) {}
-    setTimeout(() => {
-      startListeningSession(false);
-    }, 150);
+    // Launch speech session cleanly through speechEngine
+    startListeningSession(false);
   };
 
   const handleSelectQuickCommand = (cmd: string) => {

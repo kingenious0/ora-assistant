@@ -23,11 +23,11 @@ class OraRecognitionService : RecognitionService() {
   companion object {
     private const val TAG = "OraRecognitionService"
     private val PREFERRED_PACKAGES = listOf(
-      "com.google.android.as",
-      "com.google.android.tts",
       "com.google.android.googlequicksearchbox",
+      "com.google.android.tts",
       "com.xiaomi.mibrain.speech",
-      "com.samsung.android.bixby.agent"
+      "com.samsung.android.bixby.agent",
+      "com.google.android.as"
     )
   }
 
@@ -35,25 +35,13 @@ class OraRecognitionService : RecognitionService() {
     val ctx = applicationContext
     val myPkg = ctx.packageName
 
-    // 1. Android 12+ (API 31+): Direct On-Device Speech Recognizer (Zero network required)
-    if (android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.S) {
-      try {
-        if (SpeechRecognizer.isOnDeviceRecognitionAvailable(ctx)) {
-          Log.i(TAG, "Creating native on-device speech recognizer (API 31+)")
-          return SpeechRecognizer.createOnDeviceSpeechRecognizer(ctx)
-        }
-      } catch (e: Exception) {
-        Log.w(TAG, "On-device recognizer creation failed: ${e.message}")
-      }
-    }
-
-    // 2. Discover available system recognition services, explicitly filtering out self to prevent circular loop
+    // 1. Discover available system recognition services, explicitly filtering out self to prevent circular loop
     try {
       val intent = Intent(RecognitionService.SERVICE_INTERFACE)
       val services = ctx.packageManager.queryIntentServices(intent, 0)
       val nonSelfServices = services.filter { it.serviceInfo.packageName != myPkg }
 
-      // Try preferred offline / system packages first
+      // Try preferred offline / system packages first (Google App, Google Speech, Xiaomi HyperOS)
       for (preferred in PREFERRED_PACKAGES) {
         val match = nonSelfServices.firstOrNull { it.serviceInfo.packageName == preferred }
         if (match != null) {
@@ -74,13 +62,19 @@ class OraRecognitionService : RecognitionService() {
       Log.w(TAG, "Error discovering system recognition services: ${e.message}")
     }
 
-    // 3. Fallback
-    return try {
-      SpeechRecognizer.createSpeechRecognizer(ctx)
-    } catch (e: Exception) {
-      Log.e(TAG, "Default recognizer creation failed: ${e.message}")
-      null
+    // 2. Android 12+ (API 31+): Direct On-Device Speech Recognizer (secondary fallback)
+    if (android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.S) {
+      try {
+        if (SpeechRecognizer.isOnDeviceRecognitionAvailable(ctx)) {
+          Log.i(TAG, "Creating native on-device speech recognizer (API 31+)")
+          return SpeechRecognizer.createOnDeviceSpeechRecognizer(ctx)
+        }
+      } catch (e: Exception) {
+        Log.w(TAG, "On-device recognizer creation failed: ${e.message}")
+      }
     }
+
+    return null
   }
 
   override fun onStartListening(recognizerIntent: Intent?, listener: Callback?) {
@@ -137,7 +131,14 @@ class OraRecognitionService : RecognitionService() {
               // RecognitionService.Callback does not expose onEvent; safely ignored
             }
           })
-          startListening(recognizerIntent)
+          val speechIntent = (recognizerIntent ?: Intent(RecognizerIntent.ACTION_RECOGNIZE_SPEECH)).apply {
+            if (!hasExtra(RecognizerIntent.EXTRA_LANGUAGE_MODEL)) {
+              putExtra(RecognizerIntent.EXTRA_LANGUAGE_MODEL, RecognizerIntent.LANGUAGE_MODEL_FREE_FORM)
+            }
+            putExtra(RecognizerIntent.EXTRA_PARTIAL_RESULTS, true)
+            putExtra(RecognizerIntent.EXTRA_PREFER_OFFLINE, true)
+          }
+          startListening(speechIntent)
         }
       } catch (e: Exception) {
         Log.e(TAG, "Failed to start delegate speech recognizer", e)

@@ -33,8 +33,8 @@ class TelephonyBridgeModule : Module() {
         }
         context.startActivity(callIntent)
         true
-      } catch (e: SecurityException) {
-        // Fallback to ACTION_DIAL if CALL_PHONE is restricted by OS
+      } catch (e: Exception) {
+        // Fallback to ACTION_DIAL if ACTION_CALL fails or is restricted by OS
         try {
           val dialIntent = Intent(Intent.ACTION_DIAL).apply {
             data = Uri.parse("tel:$sanitized")
@@ -45,8 +45,6 @@ class TelephonyBridgeModule : Module() {
         } catch (e2: Exception) {
           false
         }
-      } catch (e: Exception) {
-        false
       }
     }
 
@@ -60,11 +58,11 @@ class TelephonyBridgeModule : Module() {
           @Suppress("DEPRECATION")
           SmsManager.getDefault()
         }
-        val parts = smsManager.divideMessage(message)
-        if (parts.size > 1) {
+        val parts = smsManager?.divideMessage(message)
+        if (parts != null && parts.size > 1) {
           smsManager.sendMultipartTextMessage(sanitized, null, parts, null, null)
         } else {
-          smsManager.sendTextMessage(sanitized, null, message, null, null)
+          smsManager?.sendTextMessage(sanitized, null, message, null, null)
         }
         true
       } catch (e: Exception) {
@@ -73,6 +71,7 @@ class TelephonyBridgeModule : Module() {
           val smsIntent = Intent(Intent.ACTION_SENDTO).apply {
             data = Uri.parse("smsto:$sanitized")
             putExtra("sms_body", message)
+            putExtra(Intent.EXTRA_TEXT, message)
             flags = Intent.FLAG_ACTIVITY_NEW_TASK
           }
           context.startActivity(smsIntent)

@@ -52,7 +52,7 @@ export class NeedleEngine {
   public parse(transcript: string): IntentResolution {
     const startTime = performance.now();
     const latency = () => Math.round(performance.now() - startTime);
-    const rawClean = transcript.trim().toLowerCase().replace(/[.,!?;:]/g, '');
+    const rawClean = transcript.trim().toLowerCase().replace(/[?!,;:]/g, '').replace(/\.+$/, '');
 
     // A. Check if user ONLY spoke the wake word ("Hey Ora", "Ora", "Ok Ora", "Hello Ora", etc.)
     if (/^(?:hey|ok|okay|hi|hello)?\s*ora$/i.test(rawClean)) {
@@ -447,15 +447,17 @@ export class NeedleEngine {
       };
     }
 
-    // 5.6 Email Drafting
-    const emailMatch = clean.match(/^(?:send|draft|write|compose)\s+(?:an?\s+)?email\s+(?:to\s+)?([a-z0-9._%+-]+@[a-z0-9.-]+\.[a-z]{2,}|[a-z0-9\s]+?)(?:\s+(?:about|subject|saying|with|body)\s+(.+))?$/i);
+    // 5.6 Email Drafting (e.g. "send email to Kingenious@gmail.com", "email John: hello", "mail someone@domain.com")
+    const emailMatch = clean.match(
+      /^(?:send\s+(?:an?\s+)?(?:email|mail)|draft\s+(?:an?\s+)?(?:email|mail)|email|mail)\s+(?:to\s+)?([a-z0-9._%+-]+@[a-z0-9.-]+\.[a-z]{2,}|[a-z0-9\s]+?)(?:\s+(?:about|subject|saying|with|body|:)\s*(.+))?$/i
+    );
     if (emailMatch && emailMatch[1]) {
       const recipient = emailMatch[1].trim();
       const body = emailMatch[2]?.trim();
       return {
         rawTranscript: transcript,
         intent: { action: 'draft_email', recipient, body },
-        confidence: 0.94,
+        confidence: 0.95,
         latencyMs: latency(),
         matchedTrigger: 'draft_email',
       };

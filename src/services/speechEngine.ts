@@ -114,8 +114,8 @@ class SpeechEngineService {
       const preferredPkg = this.getBestRecognitionPackage();
       const offlineSupported = this.supportsOffline();
 
-      // Tier 1: Attempt dedicated on-device recognition (requires zero network data)
-      if (offlineSupported) {
+      // Tier 1: Attempt dedicated on-device recognition if supported
+      if (offlineSupported && preferredPkg) {
         try {
           await ExpoSpeechRecognitionModule.start({
             lang: 'en-US',
@@ -127,21 +127,32 @@ class SpeechEngineService {
           return true;
         } catch (onDeviceErr: any) {
           console.warn('[SpeechEngine] Tier 1 on-device start failed, trying Tier 2 fallback:', onDeviceErr?.message);
-          // Trigger offline model download for next time
-          this.ensureOfflineModel('en-US').catch(() => {});
         }
       }
 
-      // Tier 2: Standard recognition with selected provider
-      await ExpoSpeechRecognitionModule.start({
-        lang: 'en-US',
-        interimResults: true,
-        continuous: options.continuous ?? false,
-        requiresOnDeviceRecognition: false,
-        androidRecognitionServicePackage: preferredPkg,
-      });
-
-      return true;
+      // Tier 2: Standard recognition with system provider
+      try {
+        // If preferred package was com.google.android.as and Tier 1 failed, use standard recognizer
+        const fallbackPkg = (preferredPkg === 'com.google.android.as') ? undefined : preferredPkg;
+        await ExpoSpeechRecognitionModule.start({
+          lang: 'en-US',
+          interimResults: true,
+          continuous: options.continuous ?? false,
+          requiresOnDeviceRecognition: false,
+          androidRecognitionServicePackage: fallbackPkg,
+        });
+        return true;
+      } catch (tier2Err: any) {
+        console.warn('[SpeechEngine] Tier 2 fallback with package failed, trying default system recognizer:', tier2Err?.message);
+        // Tier 3: Default system recognizer (no package constraint)
+        await ExpoSpeechRecognitionModule.start({
+          lang: 'en-US',
+          interimResults: true,
+          continuous: options.continuous ?? false,
+          requiresOnDeviceRecognition: false,
+        });
+        return true;
+      }
     } catch (err: any) {
       console.error('[SpeechEngine] Failed to start recognition session:', err);
       options.onNotice?.(`Speech Error: ${err?.message || 'Failed to start'}`);

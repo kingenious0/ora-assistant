@@ -78,6 +78,7 @@ const withOraAssistantManifest = (config) => {
       'android.permission.WAKE_LOCK',
       'android.permission.CALL_PHONE',
       'android.permission.READ_CONTACTS',
+      'android.permission.SEND_SMS',
       'android.permission.RECORD_AUDIO',
       'android.permission.CAMERA',
       'android.permission.FLASHLIGHT',

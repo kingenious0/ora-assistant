@@ -200,9 +200,9 @@ export default function App() {
         PermissionsAndroid.PERMISSIONS.RECORD_AUDIO,
         PermissionsAndroid.PERMISSIONS.READ_CONTACTS,
         PermissionsAndroid.PERMISSIONS.CALL_PHONE,
+        PermissionsAndroid.PERMISSIONS.SEND_SMS,
       ]).then(() => {
         contactsService.loadContacts().catch(() => {});
-        speechEngine.ensureOfflineModel('en-US').catch(() => {});
       }).catch(() => {
         contactsService.loadContacts().catch(() => {});
       });
@@ -436,7 +436,6 @@ export default function App() {
 
     if (err === 'network') {
       showActionPill('Offline Recognition Active');
-      speechEngine.ensureOfflineModel('en-US').catch(() => {});
     }
 
     // Do NOT abort manual listening window on transient recognizer errors (e.g. busy or no-speech)

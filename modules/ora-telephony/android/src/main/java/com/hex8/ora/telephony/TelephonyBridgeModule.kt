@@ -15,8 +15,8 @@ class TelephonyBridgeModule : Module() {
 
     AsyncFunction("dialNumber") { phoneNumber: String, simSlot: Int? ->
       val context = appContext.reactContext ?: return@AsyncFunction false
+      val sanitized = phoneNumber.replace(Regex("[^0-9+]"), "")
       try {
-        val sanitized = phoneNumber.replace(Regex("[^0-9+]"), "")
         val callIntent = Intent(Intent.ACTION_CALL).apply {
           data = Uri.parse("tel:$sanitized")
           flags = Intent.FLAG_ACTIVITY_NEW_TASK
@@ -33,18 +33,53 @@ class TelephonyBridgeModule : Module() {
         }
         context.startActivity(callIntent)
         true
+      } catch (e: SecurityException) {
+        // Fallback to ACTION_DIAL if CALL_PHONE is restricted by OS
+        try {
+          val dialIntent = Intent(Intent.ACTION_DIAL).apply {
+            data = Uri.parse("tel:$sanitized")
+            flags = Intent.FLAG_ACTIVITY_NEW_TASK
+          }
+          context.startActivity(dialIntent)
+          true
+        } catch (e2: Exception) {
+          false
+        }
       } catch (e: Exception) {
         false
       }
     }
 
     AsyncFunction("sendDirectSms") { phoneNumber: String, message: String ->
+      val context = appContext.reactContext ?: return@AsyncFunction false
+      val sanitized = phoneNumber.replace(Regex("[^0-9+]"), "")
       try {
-        val smsManager = SmsManager.getDefault()
-        smsManager.sendTextMessage(phoneNumber, null, message, null, null)
+        val smsManager = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
+          context.getSystemService(SmsManager::class.java)
+        } else {
+          @Suppress("DEPRECATION")
+          SmsManager.getDefault()
+        }
+        val parts = smsManager.divideMessage(message)
+        if (parts.size > 1) {
+          smsManager.sendMultipartTextMessage(sanitized, null, parts, null, null)
+        } else {
+          smsManager.sendTextMessage(sanitized, null, message, null, null)
+        }
         true
       } catch (e: Exception) {
-        false
+        // Fallback to launching messaging app with pre-filled recipient and text
+        try {
+          val smsIntent = Intent(Intent.ACTION_SENDTO).apply {
+            data = Uri.parse("smsto:$sanitized")
+            putExtra("sms_body", message)
+            flags = Intent.FLAG_ACTIVITY_NEW_TASK
+          }
+          context.startActivity(smsIntent)
+          true
+        } catch (e2: Exception) {
+          false
+        }
       }
     }
 

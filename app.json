@@ -8,7 +8,11 @@
     "userInterfaceStyle": "dark",
     "ios": {
       "supportsTablet": false,
-      "bundleIdentifier": "com.hex8.ora"
+      "bundleIdentifier": "com.hex8.ora",
+      "infoPlist": {
+        "NSSpeechRecognitionUsageDescription": "Allow $(PRODUCT_NAME) to use speech recognition.",
+        "NSMicrophoneUsageDescription": "Allow $(PRODUCT_NAME) to use the microphone."
+      }
     },
     "android": {
       "package": "com.hex8.ora",
@@ -29,7 +33,8 @@
         "android.permission.WAKE_LOCK",
         "android.permission.RECORD_AUDIO",
         "com.android.alarm.permission.SET_ALARM",
-        "android.permission.QUERY_ALL_PACKAGES"
+        "android.permission.QUERY_ALL_PACKAGES",
+        "android.permission.WRITE_CONTACTS"
       ],
       "predictiveBackGestureEnabled": false
     },
@@ -63,8 +68,9 @@
     ],
     "extra": {
       "eas": {
-        "projectId": "ff0cfd33-3179-44eb-a877-08f6e29b31c5"
+        "projectId": "485fe708-4273-4e49-89c0-84a6ffda1a14"
       }
-    }
+    },
+    "owner": "niouspark"
   }
 }

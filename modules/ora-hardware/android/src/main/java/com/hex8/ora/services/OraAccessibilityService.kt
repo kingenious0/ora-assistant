@@ -17,6 +17,32 @@ class OraAccessibilityService : AccessibilityService() {
       }
     }
 
+    fun performAction(actionName: String): Boolean {
+      val service = instance ?: return false
+      return when (actionName.lowercase().trim()) {
+        "screenshot", "take_screenshot" -> {
+          if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.P) {
+            service.performGlobalAction(GLOBAL_ACTION_TAKE_SCREENSHOT)
+          } else {
+            false
+          }
+        }
+        "home", "go_home" -> service.performGlobalAction(GLOBAL_ACTION_HOME)
+        "recents", "recent_apps", "app_switcher" -> service.performGlobalAction(GLOBAL_ACTION_RECENTS)
+        "notifications", "notification_shade" -> service.performGlobalAction(GLOBAL_ACTION_NOTIFICATIONS)
+        "quick_settings", "control_center" -> service.performGlobalAction(GLOBAL_ACTION_QUICK_SETTINGS)
+        "power_dialog", "power_menu" -> {
+          if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.LOLLIPOP) {
+            service.performGlobalAction(GLOBAL_ACTION_POWER_DIALOG)
+          } else {
+            false
+          }
+        }
+        "lock", "lock_screen" -> lockScreen()
+        else -> false
+      }
+    }
+
     val isAvailable: Boolean
       get() = instance != null
   }

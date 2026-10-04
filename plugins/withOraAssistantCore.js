@@ -27,12 +27,13 @@ const withOraAssistantConfigXml = (config) => {
       const voiceXmlContent = `<?xml version="1.0" encoding="utf-8"?>
 <voice-interaction-service xmlns:android="http://schemas.android.com/apk/res/android"
     android:sessionService="com.hex8.ora.services.OraVoiceInteractionSessionService"
+    android:recognitionService="com.hex8.ora.services.OraRecognitionService"
     android:supportsAssist="true"
     android:supportsLocalInteraction="true" />
 `;
       fs.writeFileSync(voiceXmlPath, voiceXmlContent, 'utf-8');
 
-      // 2. Accessibility Service Config (Screen Lock)
+      // 2. Accessibility Service Config (Screen Lock & Global Actions)
       const accessXmlPath = path.join(xmlDir, 'ora_accessibility_config.xml');
       const accessXmlContent = `<?xml version="1.0" encoding="utf-8"?>
 <accessibility-service xmlns:android="http://schemas.android.com/apk/res/android"
@@ -40,6 +41,7 @@ const withOraAssistantConfigXml = (config) => {
     android:accessibilityFeedbackType="feedbackGeneric"
     android:accessibilityFlags="flagDefault"
     android:canRetrieveWindowContent="false"
+    android:canTakeScreenshot="true"
     android:notificationTimeout="100" />
 `;
       fs.writeFileSync(accessXmlPath, accessXmlContent, 'utf-8');
@@ -78,6 +80,7 @@ const withOraAssistantManifest = (config) => {
       'android.permission.READ_CONTACTS',
       'android.permission.RECORD_AUDIO',
       'android.permission.CAMERA',
+      'android.permission.FLASHLIGHT',
       'com.android.alarm.permission.SET_ALARM',
       'android.permission.QUERY_ALL_PACKAGES',
       'android.permission.MODIFY_AUDIO_SETTINGS',
@@ -88,6 +91,23 @@ const withOraAssistantManifest = (config) => {
       if (!exists) {
         androidManifest['uses-permission'].push({
           $: { 'android:name': perm },
+        });
+      }
+    }
+
+    // Ensure camera & flash hardware features are declared as optional
+    if (!androidManifest['uses-feature']) {
+      androidManifest['uses-feature'] = [];
+    }
+    const requiredFeatures = [
+      'android.hardware.camera',
+      'android.hardware.camera.flash',
+    ];
+    for (const feat of requiredFeatures) {
+      const exists = androidManifest['uses-feature'].some((f) => f.$['android:name'] === feat);
+      if (!exists) {
+        androidManifest['uses-feature'].push({
+          $: { 'android:name': feat, 'android:required': 'false' },
         });
       }
     }
@@ -123,12 +143,14 @@ const withOraAssistantManifest = (config) => {
       });
     }
 
-    const googlePackages = [
+    const speechPackages = [
       'com.google.android.googlequicksearchbox',
       'com.google.android.tts',
       'com.google.android.as',
+      'com.xiaomi.mibrain.speech',
+      'com.samsung.android.bixby.agent',
     ];
-    for (const pkg of googlePackages) {
+    for (const pkg of speechPackages) {
       const hasPkg = androidManifest['queries'].some((q) =>
         q.package?.some((p) => p.$['android:name'] === pkg)
       );
@@ -219,6 +241,40 @@ const withOraAssistantManifest = (config) => {
           'android:permission': 'android.permission.BIND_VOICE_INTERACTION',
           'android:exported': 'true',
         },
+      });
+    }
+
+    // B2. Native Recognition Service (Fulfills Android Default Assistant speech binding contract)
+    const recognitionServiceName = 'com.hex8.ora.services.OraRecognitionService';
+    const hasRecognitionService = mainApplication.service.some(
+      (s) => s.$['android:name'] === recognitionServiceName
+    );
+    if (!hasRecognitionService) {
+      mainApplication.service.push({
+        $: {
+          'android:name': recognitionServiceName,
+          'android:label': 'Ora Speech Recognition Service',
+          'android:permission': 'android.permission.BIND_RECOGNITION_SERVICE',
+          'android:exported': 'true',
+        },
+        'intent-filter': [
+          {
+            action: [
+              {
+                $: {
+                  'android:name': 'android.speech.RecognitionService',
+                },
+              },
+            ],
+            category: [
+              {
+                $: {
+                  'android:name': 'android.intent.category.DEFAULT',
+                },
+              },
+            ],
+          },
+        ],
       });
     }
 

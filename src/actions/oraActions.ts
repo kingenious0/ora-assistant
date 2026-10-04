@@ -3,6 +3,7 @@ import * as Linking from 'expo-linking';
 import * as Haptics from 'expo-haptics';
 import * as Speech from 'expo-speech';
 import * as IntentLauncher from 'expo-intent-launcher';
+import * as Contacts from 'expo-contacts';
 import { OraIntent } from '../types/intent';
 import { dbService } from '../services/database';
 import { contactsService } from '../services/contactsService';
@@ -346,6 +347,26 @@ class OraActionController {
           result = await this.handleClockAlert(intent.time, intent.type, intent.label);
           break;
 
+        case 'dismiss_alarm':
+          result = await this.handleDismissAlarm();
+          break;
+
+        case 'show_alarms':
+          result = await this.handleShowAlarms();
+          break;
+
+        case 'media_control':
+          result = await this.handleMediaControl(intent.command, intent.query, intent.app);
+          break;
+
+        case 'navigate_to':
+          result = await this.handleNavigateTo(intent.destination);
+          break;
+
+        case 'draft_email':
+          result = await this.handleDraftEmail(intent.recipient, intent.subject, intent.body);
+          break;
+
         case 'launch_app':
           result = await this.handleLaunchApp(intent.app);
           break;
@@ -360,6 +381,10 @@ class OraActionController {
 
         case 'lock_device':
           result = await this.handleLockDevice();
+          break;
+
+        case 'system_action':
+          result = await this.handleSystemAction(intent.command);
           break;
 
         case 'volume_control':
@@ -440,25 +465,58 @@ class OraActionController {
   private async handleFlashlight(targetState: boolean, ctx: ActionContext): Promise<ActionExecutionResult> {
     const stateText = targetState ? 'on' : 'off';
 
-    // 1. Instant native CameraManager toggle via OraHardware
-    if (Platform.OS === 'android' && OraHardware?.setTorchMode) {
-      try {
-        const nativeSuccess = await OraHardware.setTorchMode(targetState);
-        if (nativeSuccess) {
-          ctx.setTorch(targetState);
+    // 1. Instant native CameraManager toggle via OraHardware on Android
+    if (Platform.OS === 'android') {
+      if (OraHardware?.setTorchMode) {
+        try {
+          const nativeSuccess = await OraHardware.setTorchMode(targetState);
+          if (nativeSuccess) {
+            ctx.setTorch(targetState);
+            return {
+              success: true,
+              pillText: targetState ? '⚡ Flashlight On' : '⚡ Flashlight Off',
+              spokenConfirmation: `Flashlight turned ${stateText}.`,
+              intentAction: 'toggle_flashlight',
+            };
+          } else {
+            console.warn('[OraActions] Native torch returned false. Checking permission or camera availability.');
+            // Request camera permission in case OEM requires runtime permission
+            const permGranted = await ctx.requestCameraPermission();
+            if (permGranted) {
+              const retrySuccess = await OraHardware.setTorchMode(targetState).catch(() => false);
+              if (retrySuccess) {
+                ctx.setTorch(targetState);
+                return {
+                  success: true,
+                  pillText: targetState ? '⚡ Flashlight On' : '⚡ Flashlight Off',
+                  spokenConfirmation: `Flashlight turned ${stateText}.`,
+                  intentAction: 'toggle_flashlight',
+                };
+              }
+            }
+
+            return {
+              success: false,
+              pillText: '⚡ Flashlight Unavailable',
+              spokenConfirmation: `I couldn't turn ${stateText} the flashlight. Please check camera permissions in settings.`,
+              intentAction: 'toggle_flashlight',
+              error: 'CameraManager setTorchMode returned false',
+            };
+          }
+        } catch (e: any) {
+          console.warn('[OraActions] Native torch error:', e);
           return {
-            success: true,
-            pillText: targetState ? '⚡ Flashlight On' : '⚡ Flashlight Off',
-            spokenConfirmation: `Flashlight turned ${stateText}.`,
+            success: false,
+            pillText: '⚡ Flashlight Error',
+            spokenConfirmation: `Unable to access flashlight: ${e?.message || 'hardware error'}`,
             intentAction: 'toggle_flashlight',
+            error: String(e),
           };
         }
-      } catch (e) {
-        console.warn('[OraActions] Native torch error, trying fallback:', e);
       }
     }
 
-    // 2. CameraView fallback
+    // 2. CameraView fallback for non-Android platforms (e.g. iOS)
     const hasPermission = await ctx.requestCameraPermission();
     if (!hasPermission) {
       return {
@@ -562,6 +620,16 @@ class OraActionController {
         success: false,
         pillText: 'No Pending Selection',
         spokenConfirmation: 'There is no pending contact selection.',
+        intentAction: 'disambiguate_choice',
+      };
+    }
+
+    if (index === -1) {
+      contactsService.clearPendingDisambiguation();
+      return {
+        success: true,
+        pillText: '🚫 Selection Cancelled',
+        spokenConfirmation: 'Cancelled.',
         intentAction: 'disambiguate_choice',
       };
     }
@@ -795,21 +863,39 @@ class OraActionController {
   }
 
   /**
-   * System Clock Alarms via Android IntentLauncher & OraLauncher
+   * System Clock Alarms & Timers via Android AlarmClock Intent with EXTRA_SKIP_UI = true
    */
   private async handleClockAlert(timeStr: string, type: 'alarm' | 'timer', label?: string): Promise<ActionExecutionResult> {
-    const parsed = this.parseTime(timeStr);
+    const alertLabel = label || (type === 'alarm' ? 'Ora Alarm' : 'Ora Timer');
 
     if (Platform.OS === 'android') {
       try {
         if (type === 'alarm') {
+          const parsed = this.parseTime(timeStr);
+
+          // 1. Silent native alarm execution without popping Clock UI
+          if (OraHardware?.setSilentAlarm) {
+            try {
+              const nativeOk = await OraHardware.setSilentAlarm(parsed.hour, parsed.minute, alertLabel);
+              if (nativeOk) {
+                return {
+                  success: true,
+                  pillText: `⏰ Alarm: ${timeStr}`,
+                  spokenConfirmation: `Alarm set for ${timeStr}.`,
+                  intentAction: 'set_clock_alert',
+                };
+              }
+            } catch (e) {}
+          }
+
+          // 2. IntentLauncher fallback with EXTRA_SKIP_UI = true
           try {
             await IntentLauncher.startActivityAsync('android.intent.action.SET_ALARM', {
               extra: {
                 'android.intent.extra.alarm.HOUR': parsed.hour,
                 'android.intent.extra.alarm.MINUTES': parsed.minute,
-                'android.intent.extra.alarm.MESSAGE': label || 'Ora Alarm',
-                'android.intent.extra.alarm.SKIP_UI': false,
+                'android.intent.extra.alarm.MESSAGE': alertLabel,
+                'android.intent.extra.alarm.SKIP_UI': true,
               },
             });
           } catch (secErr) {
@@ -832,13 +918,31 @@ class OraActionController {
             }
           }
         } else {
-          const totalSeconds = parsed.hour * 3600 + parsed.minute * 60;
+          // Timer calculation
+          const totalSeconds = this.parseTimerSeconds(timeStr);
+
+          // 1. Silent native timer execution
+          if (OraHardware?.setSilentTimer) {
+            try {
+              const nativeOk = await OraHardware.setSilentTimer(totalSeconds, alertLabel);
+              if (nativeOk) {
+                return {
+                  success: true,
+                  pillText: `⏳ Timer: ${timeStr}`,
+                  spokenConfirmation: `Timer set for ${timeStr}.`,
+                  intentAction: 'set_clock_alert',
+                };
+              }
+            } catch (e) {}
+          }
+
+          // 2. IntentLauncher fallback with EXTRA_SKIP_UI = true
           try {
             await IntentLauncher.startActivityAsync('android.intent.action.SET_TIMER', {
               extra: {
                 'android.intent.extra.alarm.LENGTH': totalSeconds > 0 ? totalSeconds : 300,
-                'android.intent.extra.alarm.MESSAGE': label || 'Ora Timer',
-                'android.intent.extra.alarm.SKIP_UI': false,
+                'android.intent.extra.alarm.MESSAGE': alertLabel,
+                'android.intent.extra.alarm.SKIP_UI': true,
               },
             });
           } catch (secErr) {
@@ -853,7 +957,7 @@ class OraActionController {
           intentAction: 'set_clock_alert',
         };
       } catch (e) {
-        console.warn('[OraActions] Clock alert fallback:', e);
+        console.warn('[OraActions] Clock alert error:', e);
       }
     }
 
@@ -862,6 +966,260 @@ class OraActionController {
       pillText: `⏰ Alarm noted: ${timeStr}`,
       spokenConfirmation: `Setting alarm for ${timeStr}.`,
       intentAction: 'set_clock_alert',
+    };
+  }
+
+  private parseTimerSeconds(timeStr: string): number {
+    const hrMatch = timeStr.match(/(\d+)\s*(?:hours?|hrs?)/i);
+    const minMatch = timeStr.match(/(\d+)\s*(?:minutes?|mins?)/i);
+    const secMatch = timeStr.match(/(\d+)\s*(?:seconds?|secs?)/i);
+
+    let total = 0;
+    if (hrMatch) total += parseInt(hrMatch[1], 10) * 3600;
+    if (minMatch) total += parseInt(minMatch[1], 10) * 60;
+    if (secMatch) total += parseInt(secMatch[1], 10);
+
+    if (total === 0) {
+      const numMatch = timeStr.match(/(\d+)/);
+      if (numMatch) {
+        total = parseInt(numMatch[1], 10) * 60;
+      } else {
+        total = 300;
+      }
+    }
+    return total;
+  }
+
+  /**
+   * Dismiss Current Ringing Alarm
+   */
+  private async handleDismissAlarm(): Promise<ActionExecutionResult> {
+    if (Platform.OS === 'android') {
+      if (OraHardware?.dismissAlarm) {
+        try {
+          const ok = await OraHardware.dismissAlarm();
+          if (ok) {
+            return {
+              success: true,
+              pillText: '⏰ Alarm Dismissed',
+              spokenConfirmation: 'Alarm dismissed.',
+              intentAction: 'dismiss_alarm',
+            };
+          }
+        } catch (e) {}
+      }
+
+      try {
+        await IntentLauncher.startActivityAsync('android.intent.action.DISMISS_ALARM');
+      } catch (e) {}
+    }
+
+    return {
+      success: true,
+      pillText: '⏰ Alarm Dismissed',
+      spokenConfirmation: 'Alarm dismissed.',
+      intentAction: 'dismiss_alarm',
+    };
+  }
+
+  /**
+   * Open & Show All Configured Alarms
+   */
+  private async handleShowAlarms(): Promise<ActionExecutionResult> {
+    if (Platform.OS === 'android') {
+      if (OraHardware?.showAlarms) {
+        try {
+          const ok = await OraHardware.showAlarms();
+          if (ok) {
+            return {
+              success: true,
+              pillText: '⏰ Clock Alarms',
+              spokenConfirmation: 'Opening alarms.',
+              intentAction: 'show_alarms',
+            };
+          }
+        } catch (e) {}
+      }
+
+      try {
+        await IntentLauncher.startActivityAsync('android.intent.action.SHOW_ALARMS');
+      } catch (e) {}
+    }
+
+    return {
+      success: true,
+      pillText: '⏰ Clock Alarms',
+      spokenConfirmation: 'Opening alarms.',
+      intentAction: 'show_alarms',
+    };
+  }
+
+  /**
+   * Media Playback Controls (Play/Pause/Skip/App Integration)
+   */
+  private async handleMediaControl(
+    command: 'play' | 'pause' | 'stop' | 'next' | 'previous',
+    query?: string,
+    app?: string
+  ): Promise<ActionExecutionResult> {
+    // 1. App-specific playback with search query (e.g. Spotify / YouTube)
+    if (query && app) {
+      const cleanApp = app.toLowerCase();
+      if (cleanApp.includes('spotify')) {
+        const spotifySearchUrl = `spotify:search:${encodeURIComponent(query)}`;
+        const canOpen = await Linking.canOpenURL(spotifySearchUrl).catch(() => false);
+        if (canOpen) {
+          await Linking.openURL(spotifySearchUrl).catch(() => {});
+        } else {
+          await Linking.openURL(`https://open.spotify.com/search/${encodeURIComponent(query)}`).catch(() => {});
+        }
+        return {
+          success: true,
+          pillText: `🎵 Spotify: ${query}`,
+          spokenConfirmation: `Playing ${query} on Spotify.`,
+          intentAction: 'media_control',
+        };
+      }
+
+      if (cleanApp.includes('youtube')) {
+        const ytAppUrl = `vnd.youtube://results?search_query=${encodeURIComponent(query)}`;
+        const canOpen = await Linking.canOpenURL(ytAppUrl).catch(() => false);
+        if (canOpen) {
+          await Linking.openURL(ytAppUrl).catch(() => {});
+        } else {
+          await Linking.openURL(`https://www.youtube.com/results?search_query=${encodeURIComponent(query)}`).catch(() => {});
+        }
+        return {
+          success: true,
+          pillText: `▶️ YouTube: ${query}`,
+          spokenConfirmation: `Searching and playing ${query} on YouTube.`,
+          intentAction: 'media_control',
+        };
+      }
+    }
+
+    // 2. Hardware media key dispatch via OraHardware AudioManager
+    if (Platform.OS === 'android' && OraHardware?.dispatchMediaKey) {
+      try {
+        const ok = await OraHardware.dispatchMediaKey(command);
+        if (ok) {
+          const labels: Record<string, { pill: string; spoken: string }> = {
+            pause: { pill: '⏸️ Music Paused', spoken: 'Music paused.' },
+            play: { pill: '▶️ Music Resumed', spoken: 'Resuming playback.' },
+            stop: { pill: '⏹️ Playback Stopped', spoken: 'Playback stopped.' },
+            next: { pill: '⏭️ Next Track', spoken: 'Skipping to next track.' },
+            previous: { pill: '⏮️ Previous Track', spoken: 'Playing previous track.' },
+          };
+          const conf = labels[command] || { pill: '🎵 Media Action', spoken: 'Media adjusted.' };
+          return {
+            success: true,
+            pillText: conf.pill,
+            spokenConfirmation: conf.spoken,
+            intentAction: 'media_control',
+          };
+        }
+      } catch (e) {
+        console.warn('[OraActions] OraHardware dispatchMediaKey failed:', e);
+      }
+    }
+
+    return {
+      success: true,
+      pillText: `🎵 Media: ${command.toUpperCase()}`,
+      spokenConfirmation: `Media ${command} command dispatched.`,
+      intentAction: 'media_control',
+    };
+  }
+
+  /**
+   * Turn-by-Turn Navigation via Google Maps / Navigation Intent
+   */
+  private async handleNavigateTo(destination: string): Promise<ActionExecutionResult> {
+    const encodedDest = encodeURIComponent(destination);
+
+    if (Platform.OS === 'android') {
+      try {
+        // 1. First try Google Navigation direct turn-by-turn intent
+        const navUrl = `google.navigation:q=${encodedDest}&mode=d`;
+        const canNav = await Linking.canOpenURL(navUrl).catch(() => false);
+        if (canNav) {
+          await Linking.openURL(navUrl);
+          return {
+            success: true,
+            pillText: `🧭 Navigating: ${destination}`,
+            spokenConfirmation: `Navigating to ${destination}.`,
+            intentAction: 'navigate_to',
+          };
+        }
+
+        // 2. Try geo coordinates / search intent
+        const geoUrl = `geo:0,0?q=${encodedDest}`;
+        const canGeo = await Linking.canOpenURL(geoUrl).catch(() => false);
+        if (canGeo) {
+          await Linking.openURL(geoUrl);
+          return {
+            success: true,
+            pillText: `🧭 Maps: ${destination}`,
+            spokenConfirmation: `Opening maps to ${destination}.`,
+            intentAction: 'navigate_to',
+          };
+        }
+      } catch (e) {}
+    }
+
+    // 3. Web Maps fallback
+    await Linking.openURL(`https://www.google.com/maps/dir/?api=1&destination=${encodedDest}`).catch(() => {});
+
+    return {
+      success: true,
+      pillText: `🧭 Navigating: ${destination}`,
+      spokenConfirmation: `Starting navigation to ${destination}.`,
+      intentAction: 'navigate_to',
+    };
+  }
+
+  /**
+   * Email Drafting via Native Email Client
+   */
+  private async handleDraftEmail(recipient?: string, subject?: string, body?: string): Promise<ActionExecutionResult> {
+    let emailTarget = recipient || '';
+
+    // If recipient is a contact name without '@', attempt phonebook email lookup
+    if (emailTarget && !emailTarget.includes('@')) {
+      try {
+        const { data } = await Contacts.getContactsAsync({
+          name: emailTarget,
+          fields: [Contacts.Fields.Emails],
+        });
+        if (data && data.length > 0 && data[0].emails && data[0].emails.length > 0 && data[0].emails[0].email) {
+          emailTarget = data[0].emails[0].email;
+        }
+      } catch (e) {}
+    }
+
+    const mailtoUrl = `mailto:${emailTarget}?subject=${encodeURIComponent(subject || '')}&body=${encodeURIComponent(body || '')}`;
+
+    if (Platform.OS === 'android') {
+      try {
+        await IntentLauncher.startActivityAsync('android.intent.action.SENDTO', {
+          data: mailtoUrl,
+        });
+        return {
+          success: true,
+          pillText: `✉️ Draft: ${recipient || 'Email'}`,
+          spokenConfirmation: `Opening email draft for ${recipient || 'your message'}.`,
+          intentAction: 'draft_email',
+        };
+      } catch (e) {}
+    }
+
+    await Linking.openURL(mailtoUrl).catch(() => {});
+
+    return {
+      success: true,
+      pillText: `✉️ Email Draft`,
+      spokenConfirmation: `Opening email compose.`,
+      intentAction: 'draft_email',
     };
   }
 
@@ -983,6 +1341,73 @@ class OraActionController {
   }
 
   /**
+   * System Global Accessibility Actions (Screenshot, Home, Recents, Notifications, Quick Settings, Power Menu)
+   */
+  private async handleSystemAction(
+    command: 'screenshot' | 'home' | 'recents' | 'notifications' | 'quick_settings' | 'power_dialog'
+  ): Promise<ActionExecutionResult> {
+    if (Platform.OS !== 'android') {
+      return {
+        success: false,
+        pillText: 'Action Unavailable',
+        spokenConfirmation: 'System global actions are only available on Android.',
+        intentAction: 'system_action',
+      };
+    }
+
+    const commandLabels: Record<string, { pill: string; spoken: string }> = {
+      screenshot: { pill: '📸 Screenshot', spoken: 'Taking screenshot.' },
+      home: { pill: '🏠 Home Screen', spoken: 'Going home.' },
+      recents: { pill: '📑 Recent Apps', spoken: 'Opening app switcher.' },
+      notifications: { pill: '🔔 Notifications', spoken: 'Opening notifications.' },
+      quick_settings: { pill: '⚙️ Quick Settings', spoken: 'Opening quick settings.' },
+      power_dialog: { pill: '⚡ Power Menu', spoken: 'Opening power options.' },
+    };
+    const info = commandLabels[command] || { pill: 'System Action', spoken: 'Done.' };
+
+    if (OraHardware?.performGlobalAction) {
+      try {
+        const success = await OraHardware.performGlobalAction(command);
+        if (success) {
+          return {
+            success: true,
+            pillText: info.pill,
+            spokenConfirmation: info.spoken,
+            intentAction: 'system_action',
+          };
+        }
+
+        // If performGlobalAction returned false, accessibility service is likely not enabled
+        try {
+          await IntentLauncher.startActivityAsync('android.settings.ACCESSIBILITY_SETTINGS');
+        } catch (_) {}
+
+        return {
+          success: false,
+          pillText: 'Enable Accessibility',
+          spokenConfirmation: 'Please enable Ora in Accessibility Settings to allow system actions.',
+          intentAction: 'system_action',
+        };
+      } catch (e: any) {
+        console.warn('[OraActions] performGlobalAction error:', e);
+        return {
+          success: false,
+          pillText: 'System Action Error',
+          spokenConfirmation: `Failed to perform action: ${e?.message || 'unknown error'}`,
+          intentAction: 'system_action',
+        };
+      }
+    }
+
+    return {
+      success: false,
+      pillText: 'System Action Unavailable',
+      spokenConfirmation: 'System accessibility actions are unavailable on this device.',
+      intentAction: 'system_action',
+    };
+  }
+
+  /**
    * Device Volume Control (Native Audio Stream Adjustment with System Volume HUD)
    */
   private async handleVolumeControl(direction: string, value?: number): Promise<ActionExecutionResult> {
@@ -1030,6 +1455,7 @@ class OraActionController {
         sound: 'android.settings.SOUND_SETTINGS',
         battery: 'android.intent.action.POWER_USAGE_SUMMARY',
         apps: 'android.settings.APPLICATION_SETTINGS',
+        accessibility: 'android.settings.ACCESSIBILITY_SETTINGS',
         general: 'android.settings.SETTINGS',
       };
 
@@ -1046,6 +1472,7 @@ class OraActionController {
       sound: 'Sound',
       battery: 'Battery',
       apps: 'Apps',
+      accessibility: 'Accessibility',
       general: 'Settings',
     };
     const title = labels[section] || 'Settings';

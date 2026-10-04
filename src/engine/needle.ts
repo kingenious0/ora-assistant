@@ -83,16 +83,40 @@ export class NeedleEngine {
     const pendingDisambiguation = contactsService.getPendingDisambiguation();
     if (pendingDisambiguation && pendingDisambiguation.candidates.length > 0) {
       const candidates = pendingDisambiguation.candidates;
+
+      // 0. Cancellation check
+      if (/^(?:cancel|never\s*mind|stop|forget\s*it|no|exit|close)$/i.test(clean)) {
+        return {
+          rawTranscript: transcript,
+          intent: {
+            action: 'disambiguate_choice',
+            index: -1,
+          },
+          confidence: 0.99,
+          latencyMs: latency(),
+          matchedTrigger: 'disambiguation_cancellation',
+        };
+      }
+
       let selectedIdx = -1;
 
-      if (/\b(1|first|one|option 1|number 1|first one)\b/i.test(clean)) selectedIdx = 0;
-      else if (/\b(2|second|two|option 2|number 2|second one)\b/i.test(clean) && candidates.length > 1) selectedIdx = 1;
-      else if (/\b(3|third|three|option 3|number 3|third one)\b/i.test(clean) && candidates.length > 2) selectedIdx = 2;
-      else if (/\b(4|fourth|four|option 4|number 4|fourth one)\b/i.test(clean) && candidates.length > 3) selectedIdx = 3;
+      // 1. Ordinals & Numbers (e.g. "first one", "the second", "option 3", "number 2")
+      if (/\b(1|first|one|option\s+1|number\s+1|first\s+one|the\s+first)\b/i.test(clean)) selectedIdx = 0;
+      else if (/\b(2|second|two|option\s+2|number\s+2|second\s+one|the\s+second)\b/i.test(clean) && candidates.length > 1) selectedIdx = 1;
+      else if (/\b(3|third|three|option\s+3|number\s+3|third\s+one|the\s+third)\b/i.test(clean) && candidates.length > 2) selectedIdx = 2;
+      else if (/\b(4|fourth|four|option\s+4|number\s+4|fourth\s+one|the\s+fourth)\b/i.test(clean) && candidates.length > 3) selectedIdx = 3;
 
+      // 2. Direct name substring / token match (e.g. "Kofi Work", "Work", "The gym one")
       if (selectedIdx === -1) {
         for (let i = 0; i < candidates.length; i++) {
-          if (clean.includes(candidates[i].name.toLowerCase())) {
+          const candLower = candidates[i].name.toLowerCase();
+          if (clean.includes(candLower) || candLower.includes(clean)) {
+            selectedIdx = i;
+            break;
+          }
+          // Match distinct individual name tokens (e.g. candidate is "Kofi Work" and clean is "work")
+          const tokens = candLower.split(/[\s,.-]+/);
+          if (tokens.some((t) => t.length > 2 && clean.includes(t))) {
             selectedIdx = i;
             break;
           }
@@ -125,10 +149,71 @@ export class NeedleEngine {
       };
     }
 
+    // 1.1 Global Accessibility Actions (Screenshot, Home, Recents, Notifications, Quick Settings, Power Menu)
+    if (/^(?:take\s+(?:a\s+)?screenshot|capture\s+(?:the\s+)?screen|screenshot(?:\s+this|\s+now)?|screen\s+capture)$/i.test(clean) || /\b(take\s+(?:a\s+)?screenshot|capture\s+(?:the\s+)?screen)\b/i.test(clean)) {
+      return {
+        rawTranscript: transcript,
+        intent: { action: 'system_action', command: 'screenshot' },
+        confidence: 0.98,
+        latencyMs: latency(),
+        matchedTrigger: 'system_action',
+      };
+    }
+
+    if (/^(?:go\s+home|go\s+to\s+home\s*screen|home\s*screen|take\s+me\s+home|minimize(?:\s+all)?|exit\s+to\s+home)$/i.test(clean)) {
+      return {
+        rawTranscript: transcript,
+        intent: { action: 'system_action', command: 'home' },
+        confidence: 0.98,
+        latencyMs: latency(),
+        matchedTrigger: 'system_action',
+      };
+    }
+
+    if (/^(?:recent\s+apps|show\s+recents|open\s+recents|app\s+switcher|switch\s+apps|show\s+open\s+apps|multitask(?:ing)?)$/i.test(clean)) {
+      return {
+        rawTranscript: transcript,
+        intent: { action: 'system_action', command: 'recents' },
+        confidence: 0.98,
+        latencyMs: latency(),
+        matchedTrigger: 'system_action',
+      };
+    }
+
+    if (/^(?:open\s+notifications|show\s+notifications|pull\s+down\s+notifications|notification\s+shade|view\s+notifications)$/i.test(clean)) {
+      return {
+        rawTranscript: transcript,
+        intent: { action: 'system_action', command: 'notifications' },
+        confidence: 0.98,
+        latencyMs: latency(),
+        matchedTrigger: 'system_action',
+      };
+    }
+
+    if (/^(?:open\s+quick\s+settings|quick\s+settings|show\s+quick\s+settings|control\s+center)$/i.test(clean)) {
+      return {
+        rawTranscript: transcript,
+        intent: { action: 'system_action', command: 'quick_settings' },
+        confidence: 0.98,
+        latencyMs: latency(),
+        matchedTrigger: 'system_action',
+      };
+    }
+
+    if (/^(?:power\s+menu|power\s+dialog|power\s+options|show\s+power\s+menu|restart\s+menu)$/i.test(clean)) {
+      return {
+        rawTranscript: transcript,
+        intent: { action: 'system_action', command: 'power_dialog' },
+        confidence: 0.98,
+        latencyMs: latency(),
+        matchedTrigger: 'system_action',
+      };
+    }
+
     // 2. Flashlight / Torch
-    if (/\b(torch|flashlight|light)\b/.test(clean)) {
-      const turnOff = /\b(off|kill|disable|stop)\b/.test(clean);
-      const turnOn = /\b(on|enable|start|turn on)\b/.test(clean) || !turnOff;
+    if (/\b(torch|flashlight|flash\s*light|flash|light)\b/i.test(clean) && !/\b(flight|lightweight|daylight|highlight)\b/i.test(clean)) {
+      const turnOff = /\b(off|kill|disable|stop|turn\s+off|shut\s+off)\b/i.test(clean);
+      const turnOn = /\b(on|enable|start|turn\s+on)\b/i.test(clean) || !turnOff;
       return {
         rawTranscript: transcript,
         intent: { action: 'toggle_flashlight', state: turnOn },
@@ -178,6 +263,61 @@ export class NeedleEngine {
       };
     }
 
+    // 3.5 Media Playback & Music Controls
+    // App-specific music playback e.g. "play Burna Boy on Spotify", "play Asake on YouTube"
+    const mediaAppMatch = clean.match(/^(?:play|listen\s+to|put\s+on)\s+(.+?)\s+on\s+(spotify|youtube(?:\s+music)?)$/i);
+    if (mediaAppMatch && mediaAppMatch[1] && mediaAppMatch[2]) {
+      const targetApp = mediaAppMatch[2].toLowerCase().includes('spotify') ? 'spotify' : 'youtube';
+      return {
+        rawTranscript: transcript,
+        intent: { action: 'media_control', command: 'play', query: mediaAppMatch[1].trim(), app: targetApp },
+        confidence: 0.98,
+        latencyMs: latency(),
+        matchedTrigger: 'media_control',
+      };
+    }
+
+    // Media transport keys (play, pause, next, previous, stop)
+    if (/^(?:pause|pause\s+(?:the\s+)?(?:music|song|playback|track)|stop\s+(?:music|playback))$/i.test(clean)) {
+      return {
+        rawTranscript: transcript,
+        intent: { action: 'media_control', command: 'pause' },
+        confidence: 0.98,
+        latencyMs: latency(),
+        matchedTrigger: 'media_control',
+      };
+    }
+
+    if (/^(?:play\s+(?:the\s+)?(?:music|song)|resume\s+(?:the\s+)?(?:music|song|playback)|unpause|resume|^play$)$/i.test(clean)) {
+      return {
+        rawTranscript: transcript,
+        intent: { action: 'media_control', command: 'play' },
+        confidence: 0.97,
+        latencyMs: latency(),
+        matchedTrigger: 'media_control',
+      };
+    }
+
+    if (/^(?:next\s+(?:song|track)|skip\s+(?:this\s+)?(?:song|track)|skip|^next$)$/i.test(clean)) {
+      return {
+        rawTranscript: transcript,
+        intent: { action: 'media_control', command: 'next' },
+        confidence: 0.98,
+        latencyMs: latency(),
+        matchedTrigger: 'media_control',
+      };
+    }
+
+    if (/^(?:previous\s+(?:song|track)|prev\s+(?:song|track)|last\s+song|go\s+back\s+(?:a\s+)?song|^previous$|^prev$)$/i.test(clean)) {
+      return {
+        rawTranscript: transcript,
+        intent: { action: 'media_control', command: 'previous' },
+        confidence: 0.97,
+        latencyMs: latency(),
+        matchedTrigger: 'media_control',
+      };
+    }
+
     // 4. Audio Ringer Mode (Mute / Silent / Vibrate)
     if (/\b(mute|silent|vibrate|unmute|sound on|normal sound|ringer)\b/.test(clean)) {
       let mode: 'silent' | 'vibrate' | 'normal' = 'normal';
@@ -197,7 +337,7 @@ export class NeedleEngine {
       };
     }
 
-    // 5. Settings Sections (Wi-Fi, Bluetooth, Display, Battery, Sound)
+    // 5. Settings Sections (Wi-Fi, Bluetooth, Display, Sound, Battery, Apps, Accessibility, General)
     if (/\b(wi-?fi|wifi)\s*(?:settings)?\b/.test(clean)) {
       return {
         rawTranscript: transcript,
@@ -223,6 +363,68 @@ export class NeedleEngine {
         confidence: 0.96,
         latencyMs: latency(),
         matchedTrigger: 'open_settings_section',
+      };
+    }
+    if (/\b(sound|volume)\s+settings\b/.test(clean)) {
+      return {
+        rawTranscript: transcript,
+        intent: { action: 'open_settings_section', section: 'sound' },
+        confidence: 0.96,
+        latencyMs: latency(),
+        matchedTrigger: 'open_settings_section',
+      };
+    }
+    if (/\b(app|apps|application|applications)\s+settings\b/.test(clean)) {
+      return {
+        rawTranscript: transcript,
+        intent: { action: 'open_settings_section', section: 'apps' },
+        confidence: 0.96,
+        latencyMs: latency(),
+        matchedTrigger: 'open_settings_section',
+      };
+    }
+    if (/\b(accessibility)\s*(?:settings)?\b/.test(clean)) {
+      return {
+        rawTranscript: transcript,
+        intent: { action: 'open_settings_section', section: 'accessibility' },
+        confidence: 0.97,
+        latencyMs: latency(),
+        matchedTrigger: 'open_settings_section',
+      };
+    }
+    if (/^(?:open\s+)?settings$/i.test(clean)) {
+      return {
+        rawTranscript: transcript,
+        intent: { action: 'open_settings_section', section: 'general' },
+        confidence: 0.98,
+        latencyMs: latency(),
+        matchedTrigger: 'open_settings_section',
+      };
+    }
+
+    // 5.5 Navigation & Turn-by-Turn Directions
+    const navMatch = clean.match(/^(?:navigate(?:\s+to)?|directions(?:\s+to)?|take\s+me\s+to|drive\s+to|route\s+to|how\s+do\s+i\s+get\s+to)\s+(.+)$/i);
+    if (navMatch && navMatch[1]) {
+      return {
+        rawTranscript: transcript,
+        intent: { action: 'navigate_to', destination: navMatch[1].trim() },
+        confidence: 0.96,
+        latencyMs: latency(),
+        matchedTrigger: 'navigate_to',
+      };
+    }
+
+    // 5.6 Email Drafting
+    const emailMatch = clean.match(/^(?:send|draft|write|compose)\s+(?:an?\s+)?email\s+(?:to\s+)?([a-z0-9._%+-]+@[a-z0-9.-]+\.[a-z]{2,}|[a-z0-9\s]+?)(?:\s+(?:about|subject|saying|with|body)\s+(.+))?$/i);
+    if (emailMatch && emailMatch[1]) {
+      const recipient = emailMatch[1].trim();
+      const body = emailMatch[2]?.trim();
+      return {
+        rawTranscript: transcript,
+        intent: { action: 'draft_email', recipient, body },
+        confidence: 0.94,
+        latencyMs: latency(),
+        matchedTrigger: 'draft_email',
       };
     }
 
@@ -471,11 +673,32 @@ export class NeedleEngine {
       };
     }
 
-    // 15. Alarms & Timers
-    if (/\b(alarm|wake me up|timer)\b/.test(clean)) {
-      const isTimer = /\b(timer)\b/.test(clean);
-      const timeMatch = clean.match(/(\d{1,2}(?::\d{2})?\s*(?:am|pm)?|\d+\s*(?:minutes?|mins?|seconds?|hours?))/i);
-      const resolvedTime = timeMatch ? timeMatch[1] : '07:00 AM';
+    // 15. Dismiss & Show Alarms
+    if (/^(?:dismiss|stop|turn\s+off|cancel|silence)\s+(?:the\s+)?(?:alarm|timer)$/i.test(clean) || /^(?:dismiss|silence)\s+alarm$/i.test(clean)) {
+      return {
+        rawTranscript: transcript,
+        intent: { action: 'dismiss_alarm' },
+        confidence: 0.98,
+        latencyMs: latency(),
+        matchedTrigger: 'dismiss_alarm',
+      };
+    }
+
+    if (/^(?:show|open|view|list|check)\s+(?:all\s+)?(?:my\s+)?alarms$/i.test(clean) || /^(?:my\s+alarms)$/i.test(clean)) {
+      return {
+        rawTranscript: transcript,
+        intent: { action: 'show_alarms' },
+        confidence: 0.98,
+        latencyMs: latency(),
+        matchedTrigger: 'show_alarms',
+      };
+    }
+
+    // 15.5 Alarms & Timers (Silent Background Clock API)
+    if (/\b(alarm|wake me up|timer|countdown)\b/.test(clean)) {
+      const isTimer = /\b(timer|countdown|in\s+\d+\s*(?:minutes?|seconds?|hours?))\b/.test(clean);
+      const timeMatch = clean.match(/(\d{1,2}(?::\d{2})?\s*(?:am|pm)?|\d+\s*(?:minutes?|mins?|seconds?|secs?|hours?|hrs?))/i);
+      const resolvedTime = timeMatch ? timeMatch[1] : (isTimer ? '5 minutes' : '07:00 AM');
       return {
         rawTranscript: transcript,
         intent: {
@@ -484,7 +707,7 @@ export class NeedleEngine {
           type: isTimer ? 'timer' : 'alarm',
           label: 'Ora Voice Alert',
         },
-        confidence: 0.93,
+        confidence: 0.94,
         latencyMs: latency(),
         matchedTrigger: 'set_clock_alert',
       };

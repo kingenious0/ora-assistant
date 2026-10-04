@@ -292,8 +292,26 @@ class ContactsService {
     return this.permissionGranted;
   }
 
+  private disambiguationListeners: Set<(ctx: DisambiguationContext | null) => void> = new Set();
+
+  public addDisambiguationListener(listener: (ctx: DisambiguationContext | null) => void): () => void {
+    this.disambiguationListeners.add(listener);
+    listener(this.getPendingDisambiguation());
+    return () => this.disambiguationListeners.delete(listener);
+  }
+
+  private notifyDisambiguation(): void {
+    const current = this.getPendingDisambiguation();
+    for (const listener of this.disambiguationListeners) {
+      try {
+        listener(current);
+      } catch (e) {}
+    }
+  }
+
   public setPendingDisambiguation(ctx: DisambiguationContext | null): void {
     this.pendingDisambiguation = ctx;
+    this.notifyDisambiguation();
   }
 
   public getPendingDisambiguation(): DisambiguationContext | null {
@@ -301,6 +319,7 @@ class ContactsService {
     // Expire after 35 seconds of inactivity
     if (Date.now() - this.pendingDisambiguation.timestamp > 35000) {
       this.pendingDisambiguation = null;
+      this.notifyDisambiguation();
       return null;
     }
     return this.pendingDisambiguation;
@@ -308,6 +327,7 @@ class ContactsService {
 
   public clearPendingDisambiguation(): void {
     this.pendingDisambiguation = null;
+    this.notifyDisambiguation();
   }
 }
 

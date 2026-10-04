@@ -31,8 +31,9 @@ import {
   ExpoSpeechRecognitionModule,
   useSpeechRecognitionEvent,
 } from 'expo-speech-recognition';
-import { contactsService } from './src/services/contactsService';
+import { contactsService, DisambiguationContext } from './src/services/contactsService';
 import { foregroundVoiceManager } from './src/services/foregroundService';
+import { speechEngine } from './src/services/speechEngine';
 import { requireNativeModule } from 'expo-modules-core';
 
 let OraHardware: any = null;
@@ -86,6 +87,19 @@ const CAPABILITY_GUIDE: CapabilityCategory[] = [
     ],
   },
   {
+    id: 'system_navigation',
+    name: 'OS & Accessibility Actions',
+    icon: 'phone-portrait-outline',
+    description: 'Zero-touch navigation, screenshots & system control',
+    examples: [
+      { phrase: 'Take a screenshot', detail: 'Native screen capture' },
+      { phrase: 'Go to home screen', detail: 'Global home navigation' },
+      { phrase: 'Recent apps', detail: 'App switcher multitasker' },
+      { phrase: 'Open notifications', detail: 'System notification shade' },
+      { phrase: 'Quick settings', detail: 'Control center quick toggles' },
+    ],
+  },
+  {
     id: 'productivity',
     name: 'Productivity & Edge Calculations',
     icon: 'calculator-outline',
@@ -110,6 +124,7 @@ export default function App() {
   const [typedInput, setTypedInput] = useState<string>('');
   const [isHandsFree, setIsHandsFree] = useState<boolean>(true);
   const [contactsCount, setContactsCount] = useState<number>(contactsService.getContactCount());
+  const [disambiguation, setDisambiguation] = useState<DisambiguationContext | null>(null);
 
   const [permission, requestPermission] = useCameraPermissions();
   const pillTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
@@ -120,11 +135,18 @@ export default function App() {
   const latestTranscriptRef = useRef<string>('');
   const silenceDebounceRef = useRef<ReturnType<typeof setTimeout> | null>(null);
 
-  // Sync real-time contacts count from cache
+  // Sync real-time contacts count and dialogue disambiguation context from cache
   useEffect(() => {
-    return contactsService.addChangeListener((count) => {
+    const unsubCount = contactsService.addChangeListener((count) => {
       setContactsCount(count);
     });
+    const unsubDisambiguation = contactsService.addDisambiguationListener((ctx) => {
+      setDisambiguation(ctx);
+    });
+    return () => {
+      unsubCount();
+      unsubDisambiguation();
+    };
   }, []);
 
   // Check and process any pending voice command from Power Button assistant session
@@ -180,6 +202,7 @@ export default function App() {
         PermissionsAndroid.PERMISSIONS.CALL_PHONE,
       ]).then(() => {
         contactsService.loadContacts().catch(() => {});
+        speechEngine.ensureOfflineModel('en-US').catch(() => {});
       }).catch(() => {
         contactsService.loadContacts().catch(() => {});
       });
@@ -198,6 +221,29 @@ export default function App() {
           ExpoSpeechRecognitionModule.stop();
         } catch (e) {}
       } else {
+        const pending = contactsService.getPendingDisambiguation();
+        if (pending && pending.candidates.length > 0) {
+          // Immediately activate microphone for user's disambiguation choice
+          setOrbMode('listening');
+          isManualListeningRef.current = true;
+          setTranscript('');
+          latestTranscriptRef.current = '';
+          if (manualListeningTimerRef.current) clearTimeout(manualListeningTimerRef.current);
+          manualListeningTimerRef.current = setTimeout(() => {
+            if (isManualListeningRef.current) {
+              isManualListeningRef.current = false;
+              contactsService.clearPendingDisambiguation();
+              setOrbMode('idle');
+            }
+          }, 10000);
+
+          if (handsFreeRestartRef.current) clearTimeout(handsFreeRestartRef.current);
+          handsFreeRestartRef.current = setTimeout(() => {
+            startListeningSession(false);
+          }, 250);
+          return;
+        }
+
         if (isHandsFree && orbMode === 'idle') {
           if (handsFreeRestartRef.current) clearTimeout(handsFreeRestartRef.current);
           handsFreeRestartRef.current = setTimeout(() => {
@@ -218,41 +264,13 @@ export default function App() {
   };
 
   /**
-   * Helper to start in-app speech recognition
+   * Helper to start in-app speech recognition via the Offline Speech Engine Orchestrator
    */
   const startListeningSession = async (continuous: boolean = false) => {
     try {
-      const permissionRes = await ExpoSpeechRecognitionModule.requestPermissionsAsync();
-      if (!permissionRes.granted) {
-        showActionPill('Microphone Permission Denied');
-        return;
-      }
-
-      // Check current engine state before launching to avoid busy conflicts
-      try {
-        const state = await ExpoSpeechRecognitionModule.getStateAsync();
-        if (state !== 'inactive') {
-          ExpoSpeechRecognitionModule.abort();
-          await new Promise((r) => setTimeout(r, 120));
-        }
-      } catch (e) {}
-
-      // On Android, retrieve the system's preferred/configured recognition service dynamically
-      let preferredPackage: string | undefined;
-      if (Platform.OS === 'android') {
-        try {
-          const defaultService = ExpoSpeechRecognitionModule.getDefaultRecognitionService();
-          if (defaultService?.packageName) {
-            preferredPackage = defaultService.packageName;
-          }
-        } catch (e) {}
-      }
-
-      await ExpoSpeechRecognitionModule.start({
-        lang: 'en-US',
-        interimResults: true,
+      await speechEngine.startListening({
         continuous,
-        androidRecognitionServicePackage: preferredPackage,
+        onNotice: (msg) => showActionPill(msg),
       });
     } catch (e: any) {
       console.warn('[Speech] Start session error:', e?.message || e);
@@ -324,9 +342,6 @@ export default function App() {
       if (contactsService.getPendingDisambiguation()) {
         setOrbMode('listening');
         showActionPill(result.pillText);
-        setTimeout(() => {
-          startListeningSession(false);
-        }, 1200);
         return;
       }
 
@@ -417,6 +432,11 @@ export default function App() {
     const err = event.error;
     if (err !== 'no-speech' && err !== 'busy') {
       console.warn('[Speech] recognition error:', err);
+    }
+
+    if (err === 'network') {
+      showActionPill('Offline Recognition Active');
+      speechEngine.ensureOfflineModel('en-US').catch(() => {});
     }
 
     // Do NOT abort manual listening window on transient recognizer errors (e.g. busy or no-speech)
@@ -626,6 +646,60 @@ export default function App() {
               style={styles.actionPill}
             >
               <Text style={styles.actionPillText}>{actionPill}</Text>
+            </Animated.View>
+          )}
+
+          {/* Interactive Disambiguation Dialogue Card */}
+          {disambiguation && disambiguation.candidates.length > 0 && (
+            <Animated.View
+              entering={FadeInUp.springify().damping(18)}
+              exiting={FadeOutDown.duration(200)}
+              style={styles.disambiguationContainer}
+            >
+              <View style={styles.disambiguationHeader}>
+                <Text style={styles.disambiguationTitle}>
+                  {disambiguation.action === 'call' ? 'Call which contact?' : 'Text which contact?'}
+                </Text>
+                <Pressable
+                  onPress={() => {
+                    contactsService.clearPendingDisambiguation();
+                    setOrbMode('idle');
+                  }}
+                  hitSlop={10}
+                >
+                  <Ionicons name="close-circle-outline" size={20} color="#94A3B8" />
+                </Pressable>
+              </View>
+
+              {disambiguation.candidates.map((candidate, idx) => (
+                <Pressable
+                  key={candidate.id + '_' + idx}
+                  onPress={() => {
+                    processUtterance(`option ${idx + 1}`);
+                  }}
+                  style={({ pressed }) => [
+                    styles.disambiguationCard,
+                    pressed && styles.disambiguationCardPressed,
+                  ]}
+                >
+                  <View style={styles.disambiguationBadge}>
+                    <Text style={styles.disambiguationBadgeText}>{idx + 1}</Text>
+                  </View>
+                  <View style={styles.disambiguationDetails}>
+                    <Text style={styles.disambiguationName} numberOfLines={1}>
+                      {candidate.name}
+                    </Text>
+                    <Text style={styles.disambiguationPhone} numberOfLines={1}>
+                      {candidate.phone}
+                    </Text>
+                  </View>
+                  <Ionicons
+                    name={disambiguation.action === 'call' ? 'call' : 'chatbubble'}
+                    size={18}
+                    color="#06B6D4"
+                  />
+                </Pressable>
+              ))}
             </Animated.View>
           )}
         </View>
@@ -1214,5 +1288,76 @@ const styles = StyleSheet.create({
     color: '#000',
     fontSize: 13,
     fontWeight: '700',
+  },
+  disambiguationContainer: {
+    backgroundColor: '#0F131D',
+    borderWidth: 1,
+    borderColor: 'rgba(6, 182, 212, 0.25)',
+    borderRadius: 18,
+    padding: 14,
+    marginTop: 18,
+    width: '92%',
+    maxWidth: 380,
+    shadowColor: '#000',
+    shadowOffset: { width: 0, height: 6 },
+    shadowOpacity: 0.35,
+    shadowRadius: 10,
+    elevation: 8,
+  },
+  disambiguationHeader: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'space-between',
+    marginBottom: 10,
+    paddingHorizontal: 4,
+  },
+  disambiguationTitle: {
+    fontSize: 12,
+    fontWeight: '700',
+    color: '#38BDF8',
+    letterSpacing: 0.6,
+    textTransform: 'uppercase',
+  },
+  disambiguationCard: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    backgroundColor: 'rgba(255, 255, 255, 0.04)',
+    borderWidth: 1,
+    borderColor: 'rgba(255, 255, 255, 0.07)',
+    borderRadius: 12,
+    paddingVertical: 10,
+    paddingHorizontal: 12,
+    marginBottom: 8,
+  },
+  disambiguationCardPressed: {
+    backgroundColor: 'rgba(6, 182, 212, 0.15)',
+    borderColor: '#06B6D4',
+  },
+  disambiguationBadge: {
+    width: 26,
+    height: 26,
+    borderRadius: 13,
+    backgroundColor: 'rgba(6, 182, 212, 0.2)',
+    alignItems: 'center',
+    justifyContent: 'center',
+    marginRight: 12,
+  },
+  disambiguationBadgeText: {
+    color: '#38BDF8',
+    fontSize: 12,
+    fontWeight: '800',
+  },
+  disambiguationDetails: {
+    flex: 1,
+  },
+  disambiguationName: {
+    color: '#F8FAFC',
+    fontSize: 14,
+    fontWeight: '600',
+  },
+  disambiguationPhone: {
+    color: '#94A3B8',
+    fontSize: 12,
+    marginTop: 2,
   },
 });

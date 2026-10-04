@@ -11,11 +11,17 @@ export type OraIntent =
   | { action: 'get_battery_status' }
   | { action: 'lock_device' }
   | { action: 'volume_control'; direction: 'up' | 'down' | 'mute' | 'unmute' | 'max' | 'percent'; value?: number }
-  | { action: 'open_settings_section'; section: 'wifi' | 'bluetooth' | 'display' | 'sound' | 'battery' | 'apps' | 'general' }
+  | { action: 'media_control'; command: 'play' | 'pause' | 'stop' | 'next' | 'previous'; query?: string; app?: 'spotify' | 'youtube' | string }
+  | { action: 'navigate_to'; destination: string }
+  | { action: 'draft_email'; recipient?: string; subject?: string; body?: string }
+  | { action: 'dismiss_alarm' }
+  | { action: 'show_alarms' }
+  | { action: 'open_settings_section'; section: 'wifi' | 'bluetooth' | 'display' | 'sound' | 'battery' | 'apps' | 'accessibility' | 'general' }
   | { action: 'get_time_date'; query: 'time' | 'date' | 'day' }
   | { action: 'calculate_math'; expression: string }
   | { action: 'web_search'; query: string; engine: 'google' | 'youtube' }
   | { action: 'take_note'; text: string }
+  | { action: 'system_action'; command: 'screenshot' | 'home' | 'recents' | 'notifications' | 'quick_settings' | 'power_dialog' }
   | { action: 'disambiguate_choice'; index: number; name?: string }
   | { action: 'conversational'; kind: 'identity' | 'joke' | 'capabilities' | 'greeting' | 'wake_prompt' | 'affection' | 'gratitude' | 'status' };
 

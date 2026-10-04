@@ -135,15 +135,17 @@ class ContactsService {
           const phoneNumbers = item.phoneNumbers || [];
           if (phoneNumbers.length === 0) continue;
 
-          // Pick primary or first available valid phone number
-          const primary = phoneNumbers.find((p) => p.isPrimary) || phoneNumbers[0];
-          const rawNumber = primary?.number || '';
-          const clean = rawNumber.replace(/[^\d+]/g, '');
+          for (const p of phoneNumbers) {
+            const rawNumber = p?.number || '';
+            const clean = rawNumber.replace(/[^\d+]/g, '');
+            if (!clean) continue;
 
-          if (clean) {
+            const label = p.label ? p.label.charAt(0).toUpperCase() + p.label.slice(1).toLowerCase() : '';
+            const displayName = label && phoneNumbers.length > 1 ? `${name} (${label})` : name;
+
             loaded.push({
-              id: item.id || name,
-              name,
+              id: `${item.id || name}_${clean}`,
+              name: displayName,
               phone: rawNumber,
               cleanPhone: clean,
             });

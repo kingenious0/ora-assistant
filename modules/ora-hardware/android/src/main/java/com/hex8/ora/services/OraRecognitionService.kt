@@ -134,7 +134,7 @@ class OraRecognitionService : RecognitionService() {
             }
 
             override fun onEvent(eventType: Int, params: Bundle?) {
-              currentListener?.onEvent(eventType, params)
+              // RecognitionService.Callback does not expose onEvent; safely ignored
             }
           })
           startListening(recognizerIntent)

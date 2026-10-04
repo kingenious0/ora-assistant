@@ -563,8 +563,12 @@ class OraActionController {
       });
 
       const optionsSpeech = matches
-        .slice(0, 3)
-        .map((c, i) => `${i + 1}, ${c.name}`)
+        .slice(0, 4)
+        .map((c, i) => {
+          const sameNameCount = matches.filter((m) => m.name.toLowerCase() === c.name.toLowerCase()).length;
+          const suffix = sameNameCount > 1 && c.cleanPhone.length >= 4 ? ` ending in ${c.cleanPhone.slice(-4)}` : '';
+          return `${i + 1}, ${c.name}${suffix}`;
+        })
         .join('; and ');
       const spoken = `I found ${matches.length} contacts for ${contactQuery}: ${optionsSpeech}. Which one would you like to call?`;
       const pill = `Multiple: ${matches.map((c) => c.name).join(', ')}`;
@@ -753,8 +757,12 @@ class OraActionController {
       });
 
       const optionsSpeech = matches
-        .slice(0, 3)
-        .map((c, i) => `${i + 1}, ${c.name}`)
+        .slice(0, 4)
+        .map((c, i) => {
+          const sameNameCount = matches.filter((m) => m.name.toLowerCase() === c.name.toLowerCase()).length;
+          const suffix = sameNameCount > 1 && c.cleanPhone.length >= 4 ? ` ending in ${c.cleanPhone.slice(-4)}` : '';
+          return `${i + 1}, ${c.name}${suffix}`;
+        })
         .join('; and ');
       const spoken = `I found ${matches.length} contacts for ${contactQuery}: ${optionsSpeech}. Which one would you like to text?`;
       const pill = `Multiple: ${matches.map((c) => c.name).join(', ')}`;

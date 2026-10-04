@@ -100,25 +100,58 @@ export class NeedleEngine {
 
       let selectedIdx = -1;
 
-      // 1. Ordinals & Numbers (e.g. "first one", "the second", "option 3", "number 2")
-      if (/\b(1|first|one|option\s+1|number\s+1|first\s+one|the\s+first)\b/i.test(clean)) selectedIdx = 0;
-      else if (/\b(2|second|two|option\s+2|number\s+2|second\s+one|the\s+second)\b/i.test(clean) && candidates.length > 1) selectedIdx = 1;
-      else if (/\b(3|third|three|option\s+3|number\s+3|third\s+one|the\s+third)\b/i.test(clean) && candidates.length > 2) selectedIdx = 2;
-      else if (/\b(4|fourth|four|option\s+4|number\s+4|fourth\s+one|the\s+fourth)\b/i.test(clean) && candidates.length > 3) selectedIdx = 3;
+      // 1. Ordinals & Strict Number Choices (e.g. "first one", "the second", "option 3", "number 2", "1", "2")
+      // MUST NOT loosely match the word "one" in arbitrary sentences!
+      if (/^(?:1|one|first|the\s+first|first\s+one|option\s+1|number\s+1|choice\s+1)$/i.test(clean) ||
+          /\b(?:first\s+one|the\s+first\s+one|the\s+first|option\s+1|number\s+1|choice\s+1)\b/i.test(clean)) {
+        selectedIdx = 0;
+      } else if (/^(?:2|two|second|the\s+second|second\s+one|option\s+2|number\s+2|choice\s+2)$/i.test(clean) ||
+                 /\b(?:second\s+one|the\s+second\s+one|the\s+second|option\s+2|number\s+2|choice\s+2)\b/i.test(clean)) {
+        if (candidates.length > 1) selectedIdx = 1;
+      } else if (/^(?:3|three|third|the\s+third|third\s+one|option\s+3|number\s+3|choice\s+3)$/i.test(clean) ||
+                 /\b(?:third\s+one|the\s+third\s+one|the\s+third|option\s+3|number\s+3|choice\s+3)\b/i.test(clean)) {
+        if (candidates.length > 2) selectedIdx = 2;
+      } else if (/^(?:4|four|fourth|the\s+fourth|fourth\s+one|option\s+4|number\s+4|choice\s+4)$/i.test(clean) ||
+                 /\b(?:fourth\s+one|the\s+fourth\s+one|the\s+fourth|option\s+4|number\s+4|choice\s+4)\b/i.test(clean)) {
+        if (candidates.length > 3) selectedIdx = 3;
+      }
 
-      // 2. Direct name substring / token match (e.g. "Kofi Work", "Work", "The gym one")
+      // 2. Ending phone digits match (e.g. user says "the one ending in 1234" or "1234")
       if (selectedIdx === -1) {
-        for (let i = 0; i < candidates.length; i++) {
-          const candLower = candidates[i].name.toLowerCase();
-          if (clean.includes(candLower) || candLower.includes(clean)) {
-            selectedIdx = i;
-            break;
+        const digitsMatch = clean.match(/\b(\d{3,6})\b/);
+        if (digitsMatch) {
+          const digits = digitsMatch[1];
+          const matchedByDigits = candidates.findIndex((c) => c.cleanPhone.endsWith(digits));
+          if (matchedByDigits !== -1) {
+            selectedIdx = matchedByDigits;
           }
-          // Match distinct individual name tokens (e.g. candidate is "Kofi Work" and clean is "work")
-          const tokens = candLower.split(/[\s,.-]+/);
-          if (tokens.some((t) => t.length > 2 && clean.includes(t))) {
-            selectedIdx = i;
-            break;
+        }
+      }
+
+      // 3. Distinctive candidate name token matching
+      if (selectedIdx === -1) {
+        const origQuery = (pendingDisambiguation.query || '').toLowerCase().trim();
+        const strippedClean = clean.replace(/^(?:call|text|message|dial|the|select|choose)\s+/i, '').trim();
+
+        // Only attempt name matching if user didn't just repeat the ambiguous search query
+        if (strippedClean && strippedClean !== origQuery) {
+          const matchingCandidates: number[] = [];
+          for (let i = 0; i < candidates.length; i++) {
+            const candLower = candidates[i].name.toLowerCase();
+            // Candidate must contain the specific distinguishing token
+            if (candLower.includes(strippedClean) || strippedClean.includes(candLower)) {
+              matchingCandidates.push(i);
+            } else {
+              // Check individual distinctive tokens (e.g. "Work", "Mobile", "Smith")
+              const tokens = candLower.split(/[\s,().-]+/).filter((t) => t.length > 2 && t !== origQuery);
+              if (tokens.some((t) => strippedClean.includes(t))) {
+                matchingCandidates.push(i);
+              }
+            }
+          }
+          // Only select if UNAMBIGUOUS (exactly 1 candidate matched)
+          if (matchingCandidates.length === 1) {
+            selectedIdx = matchingCandidates[0];
           }
         }
       }
@@ -616,17 +649,9 @@ export class NeedleEngine {
         };
       }
 
-      const deviceContacts = contactsService.getContactNames();
-      let finalContact = rawTarget;
-      if (deviceContacts.length > 0) {
-        const fuzzyTarget = fuzzyMatch(rawTarget, deviceContacts, 2);
-        if (fuzzyTarget) {
-          finalContact = fuzzyTarget.match;
-        }
-      }
       return {
         rawTranscript: transcript,
-        intent: { action: 'make_call', contact: finalContact, sim_slot: simSlot },
+        intent: { action: 'make_call', contact: rawTarget, sim_slot: simSlot },
         confidence: 0.95,
         latencyMs: latency(),
         matchedTrigger: 'make_call',
@@ -640,17 +665,9 @@ export class NeedleEngine {
     if (smsMatch && smsMatch[1] && smsMatch[2]) {
       const rawContact = smsMatch[1].trim();
       const messageBody = smsMatch[2].trim();
-      const deviceContacts = contactsService.getContactNames();
-      let finalContact = rawContact;
-      if (deviceContacts.length > 0) {
-        const fuzzyTarget = fuzzyMatch(rawContact, deviceContacts, 2);
-        if (fuzzyTarget) {
-          finalContact = fuzzyTarget.match;
-        }
-      }
       return {
         rawTranscript: transcript,
-        intent: { action: 'send_sms', contact: finalContact, message: messageBody },
+        intent: { action: 'send_sms', contact: rawContact, message: messageBody },
         confidence: 0.94,
         latencyMs: latency(),
         matchedTrigger: 'send_sms',

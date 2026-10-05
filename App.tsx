@@ -721,6 +721,9 @@ export default function App() {
       if (manualListeningTimerRef.current) clearTimeout(manualListeningTimerRef.current);
       setOrbMode('idle');
       showActionPill('Could not access microphone');
+    } else if (started && isManualListeningRef.current) {
+      setOrbMode('listening');
+      showActionPill('Listening... Speak now');
     }
   };
 

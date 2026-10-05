@@ -303,21 +303,22 @@ export default function App() {
   /**
    * Helper to start in-app speech recognition via the Offline Speech Engine Orchestrator
    */
-  const startListeningSession = async (continuous: boolean = false, packageOverride?: string) => {
+  const startListeningSession = async (continuous: boolean = false, packageOverride?: string): Promise<boolean> => {
     try {
       // Don't start speech recognition if native VoiceInteractionSession is actively holding the mic
       if (Platform.OS === 'android' && OraHardware?.isVoiceSessionActive && OraHardware.isVoiceSessionActive()) {
         console.log('[Speech] VoiceInteractionSession is active — skipping app recognition');
-        return;
+        return false;
       }
 
-      await speechEngine.startListening({
+      return await speechEngine.startListening({
         continuous,
         packageOverride,
         onNotice: (msg) => showActionPill(msg),
       });
     } catch (e: any) {
       console.warn('[Speech] Start session error:', e?.message || e);
+      return false;
     }
   };
 
@@ -441,9 +442,18 @@ export default function App() {
 
   // In-App Speech Recognition Event Handlers (Continuous Hands-Free + Mic Trigger)
   useSpeechRecognitionEvent('start', () => {
-    console.log('[Speech] Recognition started');
+    console.log('[Speech] Recognition started (native recognizer bound)');
     if (isManualListeningRef.current) {
       if (orbMode !== 'listening') setOrbMode('listening');
+      showActionPill('Listening... Speak now');
+    }
+  });
+
+  useSpeechRecognitionEvent('audiostart', () => {
+    console.log('[Speech] Audio recording active (microphone stream opened)');
+    if (isManualListeningRef.current) {
+      if (orbMode !== 'listening') setOrbMode('listening');
+      showActionPill('Listening... Speak now');
     }
   });
 
@@ -669,7 +679,7 @@ export default function App() {
       handsFreeRestartRef.current = null;
     }
 
-    if (orbMode === 'listening' || orbMode === 'executing') {
+    if (orbMode === 'listening' || orbMode === 'executing' || orbMode === 'thinking') {
       // User tapped to cancel / interrupt — give HAL 250ms to release
       isManualListeningRef.current = false;
       latestTranscriptRef.current = '';
@@ -684,16 +694,16 @@ export default function App() {
     failoverCountRef.current = 0;
     latestTranscriptRef.current = '';
     setTranscript('');
-    setOrbMode('listening');
-    showActionPill('Listening... Speak now');
+    setOrbMode('thinking');
+    showActionPill('Connecting microphone...');
 
-    // Reset provider index to system default (candidate 0) on each new manual tap
+    // Reset provider index to primary candidate on each new manual tap
     speechEngine.resetPackageIndex();
 
     // Clean hardware cooldown before a new manual session
     await speechEngine.stopAndCooldown(250);
 
-    // Safe auto-timeout if user taps orb but never speaks
+    // Safe auto-timeout if user taps orb but never speaks or mic never opens
     if (manualListeningTimerRef.current) clearTimeout(manualListeningTimerRef.current);
     manualListeningTimerRef.current = setTimeout(() => {
       if (isManualListeningRef.current) {
@@ -705,7 +715,13 @@ export default function App() {
     }, 8000);
 
     // Launch single-shot manual speech session cleanly
-    await startListeningSession(false);
+    const started = await startListeningSession(false);
+    if (!started && isManualListeningRef.current) {
+      isManualListeningRef.current = false;
+      if (manualListeningTimerRef.current) clearTimeout(manualListeningTimerRef.current);
+      setOrbMode('idle');
+      showActionPill('Could not access microphone');
+    }
   };
 
   const handleSelectQuickCommand = (cmd: string) => {

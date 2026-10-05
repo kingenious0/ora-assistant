@@ -90,23 +90,26 @@ class SpeechEngineService {
       // Filter out our own package to prevent circular binding
       const validServices = allServices.filter((pkg: string) => pkg !== 'com.hex8.ora');
 
-      // Candidate 0 is ALWAYS undefined: triggers SpeechRecognizer.createSpeechRecognizer(reactContext)
-      // which uses the user/OEM configured default speech recognizer on the phone.
-      const ordered: (string | undefined)[] = [undefined];
-
       const priorityPackages = [
-        'com.google.android.googlequicksearchbox',
-        'com.xiaomi.mibrain.speech',
-        'com.google.android.tts',
-        'com.samsung.android.bixby.agent',
-        'com.google.android.as',
+        'com.google.android.tts', // Speech Services by Google (verified default & installed on Xiaomi HyperOS)
+        'com.google.android.googlequicksearchbox', // Google App
+        'com.xiaomi.mibrain.speech', // Xiaomi Speech Engine
+        'com.google.android.as', // Android System Intelligence
+        'com.samsung.android.bixby.agent', // Samsung Bixby
       ];
 
-      // Add matching priority packages
+      const ordered: (string | undefined)[] = [];
+
+      // Add matching priority packages first
       for (const priority of priorityPackages) {
         if (validServices.includes(priority) && !ordered.includes(priority)) {
           ordered.push(priority);
         }
+      }
+
+      // Add undefined (system default resolver) as a candidate
+      if (!ordered.includes(undefined)) {
+        ordered.push(undefined);
       }
 
       // Add any remaining non-self packages
@@ -116,7 +119,7 @@ class SpeechEngineService {
         }
       }
 
-      return ordered;
+      return ordered.length > 0 ? ordered : [undefined];
     } catch (e) {
       console.warn('[SpeechEngine] Error resolving recognition services:', e);
       return [undefined];
@@ -250,27 +253,7 @@ class SpeechEngineService {
 
       this.sessionActive = true;
 
-      const hasOnDevice = !pkg && this.supportsOffline();
-
-      // First attempt: If on-device recognition is supported (Android 13+), use dedicated on-device engine
-      if (hasOnDevice) {
-        try {
-          console.log('[SpeechEngine] Attempting dedicated on-device recognition engine...');
-          await ExpoSpeechRecognitionModule.start({
-            lang: 'en-US',
-            interimResults: true,
-            continuous: options.continuous ?? false,
-            requiresOnDeviceRecognition: true,
-          });
-          return true;
-        } catch (onDeviceErr: any) {
-          console.warn('[SpeechEngine] On-device recognizer failed, falling back to standard engine:', onDeviceErr?.message || onDeviceErr);
-          await this.stopAndCooldown(200);
-          this.sessionActive = true;
-        }
-      }
-
-      // Second attempt: Standard recognition engine (system default or specified package)
+      // Standard recognition engine with EXTRA_PREFER_OFFLINE (uses local models if available without stalling)
       const startOptions: any = {
         lang: 'en-US',
         interimResults: true,

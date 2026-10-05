@@ -245,38 +245,29 @@ const withOraAssistantManifest = (config) => {
       });
     }
 
-    // B2. Native Recognition Service (Fulfills Android Default Assistant speech binding contract)
+    // B2. Native Recognition Service (VoiceInteraction contract only)
+    // CRITICAL: We do NOT register android.speech.RecognitionService intent-filter here.
+    // If we did, getSpeechRecognitionServices() would return com.hex8.ora itself, and
+    // expo-speech-recognition would delegate to OraRecognitionService which tries to
+    // delegate back to Google → creating a HAL deadlock + infinite ERROR_CLIENT loop.
+    // OraRecognitionService only participates via the VoiceInteractionService contract.
     const recognitionServiceName = 'com.hex8.ora.services.OraRecognitionService';
-    const hasRecognitionService = mainApplication.service.some(
+    let recognitionService = mainApplication.service.find(
       (s) => s.$['android:name'] === recognitionServiceName
     );
-    if (!hasRecognitionService) {
-      mainApplication.service.push({
+    if (!recognitionService) {
+      recognitionService = {
         $: {
           'android:name': recognitionServiceName,
           'android:label': 'Ora Speech Recognition Service',
           'android:permission': 'android.permission.BIND_RECOGNITION_SERVICE',
           'android:exported': 'true',
         },
-        'intent-filter': [
-          {
-            action: [
-              {
-                $: {
-                  'android:name': 'android.speech.RecognitionService',
-                },
-              },
-            ],
-            category: [
-              {
-                $: {
-                  'android:name': 'android.intent.category.DEFAULT',
-                },
-              },
-            ],
-          },
-        ],
-      });
+      };
+      mainApplication.service.push(recognitionService);
+    } else {
+      // Ensure any existing intent-filter with android.speech.RecognitionService is stripped
+      delete recognitionService['intent-filter'];
     }
 
     // C. Native Accessibility Service (Zero-Touch Screen Locking)

@@ -26,6 +26,8 @@ class HardwareModule : Module() {
     var pendingVoiceCommand: String? = null
     @JvmStatic
     var isTorchActive: Boolean = false
+    @JvmStatic
+    var isVoiceSessionActive: Boolean = false
   }
 
   override fun definition() = ModuleDefinition {
@@ -35,6 +37,10 @@ class HardwareModule : Module() {
       val cmd = pendingVoiceCommand
       pendingVoiceCommand = null
       cmd
+    }
+
+    Function("isVoiceSessionActive") {
+      isVoiceSessionActive
     }
 
     Function("getTorchState") {

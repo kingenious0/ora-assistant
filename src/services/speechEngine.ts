@@ -9,8 +9,8 @@ export interface SpeechErrorInfo {
 }
 
 export function parseSpeechError(error: any): SpeechErrorInfo {
-  const errStr = String(error?.error || error || '').toLowerCase();
-  const rawCode = typeof error === 'number' ? error : error?.code;
+  const errStr = String(error?.error || error?.message || error || '').toLowerCase();
+  const rawCode = typeof error === 'number' ? error : (error?.code ?? null);
 
   if (rawCode === 1 || errStr.includes('network-timeout')) {
     return { code: 1, name: 'ERROR_NETWORK_TIMEOUT', description: 'Network operation timed out', isFatalForRetry: false };
@@ -25,7 +25,7 @@ export function parseSpeechError(error: any): SpeechErrorInfo {
     return { code: 4, name: 'ERROR_SERVER', description: 'Server sent error status', isFatalForRetry: false };
   }
   if (rawCode === 5 || errStr.includes('client') || errStr.includes('bad-grammar')) {
-    return { code: 5, name: 'ERROR_CLIENT', description: 'Client side error or invalid parameter', isFatalForRetry: true };
+    return { code: 5, name: 'ERROR_CLIENT', description: 'Client side error or invalid parameter', isFatalForRetry: false };
   }
   if (rawCode === 6 || errStr.includes('speech-timeout') || errStr.includes('no-speech')) {
     return { code: 6, name: 'ERROR_SPEECH_TIMEOUT', description: 'No speech input detected', isFatalForRetry: false };
@@ -40,28 +40,42 @@ export function parseSpeechError(error: any): SpeechErrorInfo {
     return { code: 9, name: 'ERROR_INSUFFICIENT_PERMISSIONS', description: 'Insufficient audio permissions', isFatalForRetry: true };
   }
   if (errStr.includes('abort')) {
-    return { code: null, name: 'ERROR_ABORTED', description: 'Session aborted', isFatalForRetry: true };
+    return { code: null, name: 'ERROR_ABORTED', description: 'Session aborted', isFatalForRetry: false };
   }
 
-  return { code: rawCode || null, name: `ERROR_${errStr.toUpperCase() || 'UNKNOWN'}`, description: errStr, isFatalForRetry: false };
+  return { code: rawCode, name: `ERROR_${(errStr || 'unknown').toUpperCase()}`, description: errStr, isFatalForRetry: false };
 }
 
 /**
  * Offline Speech Engine Orchestrator
  * Solves the offline/airplane-mode speech recognition gap on Android (including Xiaomi HyperOS)
  * and enforces strict hardware session handshakes so microphone contention never crashes the HAL.
+ *
+ * KEY FIX: ERROR_CLIENT (5) is NOT treated as fatal — on Xiaomi HyperOS with EXTRA_PREFER_OFFLINE,
+ * Google Speech services return ERROR_CLIENT when the online model validation times out but
+ * offline recognition is still available and working. This was causing premature session termination.
  */
 class SpeechEngineService {
   private isDownloadingModel: boolean = false;
   private currentPackageIndex: number = 0;
-  private isTransitioning: boolean = false;
+
+  // Locks and transition flags
+  private activeSessionPromise: Promise<boolean> | null = null;
+  private sessionActive: boolean = false;
+  private isCooldown: boolean = false;
+  private isStarting: boolean = false;
+
+  public isTransitioning(): boolean {
+    return this.isCooldown || this.isStarting;
+  }
 
   /**
    * Discovers and orders all native speech recognition engines on this device.
    * Priority:
-   * 1. Google Speech Services (com.google.android.tts)
-   * 2. Google App (com.google.android.googlequicksearchbox)
-   * 3. Xiaomi Speech Engine (com.xiaomi.mibrain.speech) - native on HyperOS / MIUI
+   * 0. undefined (Android System Default Speech Recognizer — exactly what keyboard dictation uses)
+   * 1. Google App (com.google.android.googlequicksearchbox)
+   * 2. Xiaomi Speech Engine (com.xiaomi.mibrain.speech) - native on HyperOS / MIUI
+   * 3. Google Speech Services (com.google.android.tts)
    * 4. Samsung Bixby (com.samsung.android.bixby.agent)
    * 5. Android System Intelligence (com.google.android.as)
    * Explicitly excludes Ora itself (com.hex8.ora) to prevent circular delegate deadlocks.
@@ -72,18 +86,21 @@ class SpeechEngineService {
     }
 
     try {
-      const allServices = ExpoSpeechRecognitionModule.getSpeechRecognitionServices() || [];
+      const allServices: string[] = ExpoSpeechRecognitionModule.getSpeechRecognitionServices() || [];
+      // Filter out our own package to prevent circular binding
       const validServices = allServices.filter((pkg: string) => pkg !== 'com.hex8.ora');
 
+      // Candidate 0 is ALWAYS undefined: triggers SpeechRecognizer.createSpeechRecognizer(reactContext)
+      // which uses the user/OEM configured default speech recognizer on the phone.
+      const ordered: (string | undefined)[] = [undefined];
+
       const priorityPackages = [
-        'com.google.android.tts',
         'com.google.android.googlequicksearchbox',
         'com.xiaomi.mibrain.speech',
+        'com.google.android.tts',
         'com.samsung.android.bixby.agent',
         'com.google.android.as',
       ];
-
-      const ordered: (string | undefined)[] = [];
 
       // Add matching priority packages
       for (const priority of priorityPackages) {
@@ -97,11 +114,6 @@ class SpeechEngineService {
         if (!ordered.includes(service)) {
           ordered.push(service);
         }
-      }
-
-      // If no valid packages found, include undefined (system default)
-      if (ordered.length === 0) {
-        ordered.push(undefined);
       }
 
       return ordered;
@@ -157,74 +169,162 @@ class SpeechEngineService {
   /**
    * Mandatory Audio Session Handshake:
    * Completely aborts any current recording stream and enforces a hardware cooldown
-   * (150-200ms) to allow Android's AudioFlinger / HAL to release exclusive PCM handles.
+   * to allow Android's AudioFlinger / HAL to release exclusive PCM handles.
    */
-  public async stopAndCooldown(delayMs: number = 200): Promise<void> {
+  public async stopAndCooldown(delayMs: number = 300): Promise<void> {
+    this.sessionActive = false;
+    this.isCooldown = true;
     try {
       ExpoSpeechRecognitionModule.abort();
     } catch (_) {}
-    await new Promise((resolve) => setTimeout(resolve, delayMs));
+    try {
+      // Wait for AudioFlinger to release the PCM lock
+      await new Promise((resolve) => setTimeout(resolve, delayMs));
+    } finally {
+      this.isCooldown = false;
+    }
   }
 
   /**
    * Starts a resilient speech recognition session with strict hardware mutual exclusion.
+   *
+   * Uses a promise-chaining lock so hands-free auto-restart and manual tap can never
+   * race each other. Each call waits for any in-progress start to finish first.
    */
-  public async startListening(options: {
+  public startListening(options: {
     continuous?: boolean;
     packageOverride?: string;
     onNotice?: (msg: string) => void;
   }): Promise<boolean> {
-    if (this.isTransitioning) {
-      console.log('[SpeechEngine] Transitioning, ignoring duplicate start call');
-      return false;
+    // If there is already a session starting, chain onto it rather than running in parallel
+    if (this.activeSessionPromise) {
+      console.log('[SpeechEngine] Session already starting — queuing after current promise');
+      this.activeSessionPromise = this.activeSessionPromise.then(() =>
+        this._doStartListening(options)
+      );
+    } else {
+      this.activeSessionPromise = this._doStartListening(options);
     }
 
-    try {
-      this.isTransitioning = true;
+    const thisPromise = this.activeSessionPromise;
+    thisPromise.finally(() => {
+      // Only clear the lock if this is still the most recent promise
+      if (this.activeSessionPromise === thisPromise) {
+        this.activeSessionPromise = null;
+      }
+    });
 
+    return thisPromise;
+  }
+
+  private async _doStartListening(options: {
+    continuous?: boolean;
+    packageOverride?: string;
+    onNotice?: (msg: string) => void;
+  }): Promise<boolean> {
+    this.isStarting = true;
+    let pkg = options.packageOverride !== undefined ? options.packageOverride : this.getCurrentPackage();
+
+    try {
       const permissionRes = await ExpoSpeechRecognitionModule.requestPermissionsAsync();
       if (!permissionRes.granted) {
         options.onNotice?.('Microphone Permission Denied');
         return false;
       }
 
-      // 1. Enforce strict hardware handshake: stop any prior session and wait for HAL release
+      // 1. Enforce strict hardware handshake: abort any prior session, wait for HAL release
       try {
         const state = await ExpoSpeechRecognitionModule.getStateAsync();
         if (state !== 'inactive') {
-          console.log(`[SpeechEngine] Engine state was "${state}", executing 200ms hardware cooldown`);
-          await this.stopAndCooldown(200);
+          console.log(`[SpeechEngine] Engine was "${state}" — executing 300ms hardware cooldown`);
+          await this.stopAndCooldown(300);
         }
       } catch (_) {
-        await this.stopAndCooldown(150);
+        // getStateAsync not available on older versions — do a conservative cooldown anyway
+        await this.stopAndCooldown(200);
       }
 
-      const pkg = options.packageOverride !== undefined ? options.packageOverride : this.getCurrentPackage();
-      console.log(`[SpeechEngine] Starting speech recognition (continuous: ${options.continuous ?? false}) with package: ${pkg || 'default system recognizer'}`);
+      console.log(
+        `[SpeechEngine] Starting (continuous: ${options.continuous ?? false}) pkg: ${pkg || 'system-default'}`
+      );
 
-      await ExpoSpeechRecognitionModule.start({
+      this.sessionActive = true;
+
+      const hasOnDevice = !pkg && this.supportsOffline();
+
+      // First attempt: If on-device recognition is supported (Android 13+), use dedicated on-device engine
+      if (hasOnDevice) {
+        try {
+          console.log('[SpeechEngine] Attempting dedicated on-device recognition engine...');
+          await ExpoSpeechRecognitionModule.start({
+            lang: 'en-US',
+            interimResults: true,
+            continuous: options.continuous ?? false,
+            requiresOnDeviceRecognition: true,
+          });
+          return true;
+        } catch (onDeviceErr: any) {
+          console.warn('[SpeechEngine] On-device recognizer failed, falling back to standard engine:', onDeviceErr?.message || onDeviceErr);
+          await this.stopAndCooldown(200);
+          this.sessionActive = true;
+        }
+      }
+
+      // Second attempt: Standard recognition engine (system default or specified package)
+      const startOptions: any = {
         lang: 'en-US',
         interimResults: true,
         continuous: options.continuous ?? false,
-        requiresOnDeviceRecognition: false, // Prevents fatal ERROR_LANGUAGE_UNAVAILABLE
-        androidRecognitionServicePackage: pkg,
+        requiresOnDeviceRecognition: false,
         androidIntentOptions: {
-          EXTRA_PREFER_OFFLINE: true, // Offline-preferred intent without hard crash
+          EXTRA_PREFER_OFFLINE: true,
         },
-      });
+      };
 
+      if (pkg) {
+        startOptions.androidRecognitionServicePackage = pkg;
+      }
+
+      await ExpoSpeechRecognitionModule.start(startOptions);
       return true;
     } catch (err: any) {
+      // Fallback: If a specific package failed on start, attempt system-default immediately
+      if (pkg) {
+        console.warn(`[SpeechEngine] Failed with package "${pkg}". Retrying with system default...`);
+        try {
+          await this.stopAndCooldown(250);
+          this.sessionActive = true;
+          await ExpoSpeechRecognitionModule.start({
+            lang: 'en-US',
+            interimResults: true,
+            continuous: options.continuous ?? false,
+            requiresOnDeviceRecognition: false,
+          });
+          return true;
+        } catch (fallbackErr) {
+          console.error('[SpeechEngine] Fallback to system-default failed:', fallbackErr);
+        }
+      }
+
+      this.sessionActive = false;
       const parsed = parseSpeechError(err);
-      console.error(`[SpeechEngine] Failed to start recognition session: ${parsed.name} (${parsed.code}) - ${parsed.description}`, err);
+      console.error(
+        `[SpeechEngine] Failed to start: ${parsed.name} (${parsed.code}) — ${parsed.description}`,
+        err
+      );
       options.onNotice?.(`Speech Error: ${parsed.name}`);
       return false;
     } finally {
-      this.isTransitioning = false;
+      this.isStarting = false;
     }
   }
 
+  public isActive(): boolean {
+    return this.sessionActive;
+  }
+
   public abort(): void {
+    this.sessionActive = false;
     try {
       ExpoSpeechRecognitionModule.abort();
     } catch (_) {}
@@ -232,5 +332,3 @@ class SpeechEngineService {
 }
 
 export const speechEngine = new SpeechEngineService();
-
-

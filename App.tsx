@@ -23,6 +23,8 @@ import Animated, {
   FadeInUp,
   FadeOutDown,
 } from 'react-native-reanimated';
+import { LinearGradient } from 'expo-linear-gradient';
+import * as Haptics from 'expo-haptics';
 import { OraOrb } from './src/components/OraOrb';
 import { OrbMode } from './src/types/intent';
 import { needle } from './src/engine/needle';
@@ -40,6 +42,23 @@ let OraHardware: any = null;
 try {
   OraHardware = requireNativeModule('OraHardware');
 } catch (e) {}
+
+interface QuickPromptChip {
+  id: string;
+  label: string;
+  icon: keyof typeof Ionicons.glyphMap;
+  command: string;
+}
+
+const QUICK_PROMPTS: QuickPromptChip[] = [
+  { id: 'torch', label: 'Flashlight', icon: 'flashlight-outline', command: 'turn on flashlight' },
+  { id: 'call', label: 'Call Mom', icon: 'call-outline', command: 'call mom' },
+  { id: 'alarm', label: 'Set Alarm 7 AM', icon: 'alarm-outline', command: 'set alarm for 7:00 AM' },
+  { id: 'timer', label: '5m Timer', icon: 'timer-outline', command: 'timer for 5 minutes' },
+  { id: 'calc', label: '25 × 14', icon: 'calculator-outline', command: 'calculate 25 times 14' },
+  { id: 'battery', label: 'Battery Level', icon: 'battery-charging-outline', command: 'battery level' },
+  { id: 'whatsapp', label: 'Open WhatsApp', icon: 'chatbubbles-outline', command: 'open whatsapp' },
+];
 
 interface CapabilityCategory {
   id: string;
@@ -181,6 +200,16 @@ export default function App() {
       if (state === 'active') {
         checkPendingVoiceCommand();
         contactsService.loadContacts().catch(() => {});
+      } else {
+        if (handsFreeRestartRef.current) {
+          clearTimeout(handsFreeRestartRef.current);
+          handsFreeRestartRef.current = null;
+        }
+        if (isManualListeningRef.current) {
+          isManualListeningRef.current = false;
+          setOrbMode('idle');
+        }
+        speechEngine.abort();
       }
     });
 
@@ -256,10 +285,7 @@ export default function App() {
         }
 
         if (isHandsFree && orbMode === 'idle') {
-          if (handsFreeRestartRef.current) clearTimeout(handsFreeRestartRef.current);
-          handsFreeRestartRef.current = setTimeout(() => {
-            startListeningSession(true);
-          }, 350);
+          scheduleHandsFreeRestart(500);
         }
       }
     });
@@ -279,6 +305,12 @@ export default function App() {
    */
   const startListeningSession = async (continuous: boolean = false, packageOverride?: string) => {
     try {
+      // Don't start speech recognition if native VoiceInteractionSession is actively holding the mic
+      if (Platform.OS === 'android' && OraHardware?.isVoiceSessionActive && OraHardware.isVoiceSessionActive()) {
+        console.log('[Speech] VoiceInteractionSession is active — skipping app recognition');
+        return;
+      }
+
       await speechEngine.startListening({
         continuous,
         packageOverride,
@@ -290,16 +322,45 @@ export default function App() {
   };
 
   /**
-   * Continuous hands-free auto-listener loop when strictly idle
+   * Unified Hands-Free Auto-Listener Scheduler
+   * Enforces single-timer scheduling with strict mutual exclusion against manual taps,
+   * TTS playback, active sessions, and native voice interaction overlays.
+   */
+  const scheduleHandsFreeRestart = (delayMs: number = 800) => {
+    if (handsFreeRestartRef.current) {
+      clearTimeout(handsFreeRestartRef.current);
+      handsFreeRestartRef.current = null;
+    }
+
+    if (!isHandsFree || isManualListeningRef.current || oraActions.isSpeaking()) return;
+
+    handsFreeRestartRef.current = setTimeout(async () => {
+      if (
+        isHandsFree &&
+        orbMode === 'idle' &&
+        !isManualListeningRef.current &&
+        !oraActions.isSpeaking() &&
+        !speechEngine.isActive() &&
+        !speechEngine.isTransitioning() &&
+        AppState.currentState === 'active' &&
+        (!OraHardware?.isVoiceSessionActive || !OraHardware.isVoiceSessionActive())
+      ) {
+        await startListeningSession(true);
+      }
+    }, delayMs);
+  };
+
+  /**
+   * Continuous hands-free auto-listener trigger on state change.
    */
   useEffect(() => {
     if (isHandsFree && orbMode === 'idle' && !isManualListeningRef.current) {
-      const timer = setTimeout(() => {
-        if (isHandsFree && orbMode === 'idle' && !isManualListeningRef.current && !oraActions.isSpeaking()) {
-          startListeningSession(true);
-        }
-      }, 800);
-      return () => clearTimeout(timer);
+      scheduleHandsFreeRestart(1000);
+    } else {
+      if (handsFreeRestartRef.current) {
+        clearTimeout(handsFreeRestartRef.current);
+        handsFreeRestartRef.current = null;
+      }
     }
   }, [isHandsFree, orbMode]);
 
@@ -460,64 +521,114 @@ export default function App() {
 
   useSpeechRecognitionEvent('error', (event) => {
     const parsed = parseSpeechError(event);
-    console.warn(`[Speech] Recognition error: ${parsed.name} (${parsed.code}) - ${parsed.description}`, event);
+    console.warn(`[Speech] Recognition error: ${parsed.name} (${parsed.code}) — ${parsed.description}`, event);
 
-    // If transient silence timeout, don't abort manual listening window early
-    if (parsed.name === 'ERROR_SPEECH_TIMEOUT' || event.error === 'no-speech') {
-      if (isManualListeningRef.current) {
-        return;
-      }
-    }
-
-    // Task A: NEVER automatically call start() inside error block if error is
-    // ERROR_CLIENT (5), ERROR_RECOGNIZER_BUSY (8), ERROR_AUDIO (3), or an abort event!
-    if (parsed.isFatalForRetry || event.error === 'busy' || event.error === 'aborted') {
-      console.warn(`[Speech] Fatal / contention error detected (${parsed.name}). Terminating session without loop.`);
-      isManualListeningRef.current = false;
-      if (manualListeningTimerRef.current) clearTimeout(manualListeningTimerRef.current);
-      if (orbMode === 'listening') {
-        setOrbMode('idle');
-      }
-      showActionPill(`Mic: ${parsed.name}`);
+    // If speech engine is currently executing a planned cooldown/abort, ignore the event completely
+    if (
+      speechEngine.isTransitioning() ||
+      parsed.name === 'ERROR_ABORTED' ||
+      (event.error as string) === 'abort' ||
+      (event.error as string) === 'aborted'
+    ) {
+      console.log('[Speech] Intentional session transition/abort — ignoring error');
       return;
     }
 
-    // Controlled Single Failover: Allow at most 1 package failover per manual interaction
-    if ((isManualListeningRef.current || orbMode === 'listening') && failoverCountRef.current < 1) {
-      failoverCountRef.current += 1;
-      const candidates = speechEngine.getCandidatePackages();
-      if (candidates.length > 1) {
-        const nextPkg = speechEngine.cycleNextPackage();
-        console.log(`[Speech] Recoverable error "${parsed.name}". Trying backup provider: ${nextPkg || 'default'}`);
-        setTimeout(async () => {
-          if (isManualListeningRef.current || orbMode === 'listening') {
-            await speechEngine.stopAndCooldown(200);
-            startListeningSession(false, nextPkg);
-          }
-        }, 200);
+    // Silence timeout / No speech detected:
+    if (parsed.name === 'ERROR_SPEECH_TIMEOUT' || event.error === 'no-speech' || parsed.name === 'ERROR_NO_MATCH') {
+      if (isManualListeningRef.current) {
+        isManualListeningRef.current = false;
+        if (manualListeningTimerRef.current) clearTimeout(manualListeningTimerRef.current);
+        setOrbMode('idle');
+        showActionPill("Didn't catch that. Tap orb to speak");
+        return;
+      }
+      // If hands-free, natural silence in room — schedule next poll cleanly without error pill
+      if (isHandsFree && orbMode === 'idle') {
+        scheduleHandsFreeRestart(1500);
         return;
       }
     }
 
-    // If all failovers exhausted or general error
+    // Recognizer busy / HAL lockout: wait with hardware cooldown, then retry or reschedule
+    if (parsed.name === 'ERROR_RECOGNIZER_BUSY' || event.error === 'busy') {
+      console.warn('[Speech] Recognizer busy — executing hardware cooldown');
+      if (isManualListeningRef.current && failoverCountRef.current < 1) {
+        failoverCountRef.current += 1;
+        setTimeout(async () => {
+          if (isManualListeningRef.current) {
+            await speechEngine.stopAndCooldown(450);
+            await startListeningSession(false);
+          }
+        }, 450);
+        return;
+      }
+      if (isHandsFree && orbMode === 'idle') {
+        scheduleHandsFreeRestart(2200);
+        return;
+      }
+    }
+
+    // Hard fatal errors: permissions or audio hardware failure
+    const isHardFatal =
+      parsed.name === 'ERROR_INSUFFICIENT_PERMISSIONS' ||
+      parsed.name === 'ERROR_AUDIO';
+
+    if (isHardFatal) {
+      console.warn(`[Speech] Hard fatal error (${parsed.name}) — terminating session.`);
+      isManualListeningRef.current = false;
+      if (manualListeningTimerRef.current) clearTimeout(manualListeningTimerRef.current);
+      if (orbMode === 'listening') setOrbMode('idle');
+      showActionPill(parsed.name === 'ERROR_INSUFFICIENT_PERMISSIONS' ? 'Mic Permission Required' : 'Audio Hardware Busy');
+      return;
+    }
+
+    // Recoverable errors (ERROR_CLIENT=5, etc.): attempt single package failover in manual session
+    if (isManualListeningRef.current && failoverCountRef.current < 1) {
+      failoverCountRef.current += 1;
+      const nextPkg = speechEngine.cycleNextPackage();
+      console.log(`[Speech] Recoverable "${parsed.name}" — trying package: ${nextPkg || 'system-default'}`);
+      setTimeout(async () => {
+        if (isManualListeningRef.current) {
+          await speechEngine.stopAndCooldown(350);
+          await startListeningSession(false, nextPkg);
+        }
+      }, 350);
+      return;
+    }
+
+    // All failovers exhausted — clean up
     if (isManualListeningRef.current) {
       isManualListeningRef.current = false;
       if (manualListeningTimerRef.current) clearTimeout(manualListeningTimerRef.current);
     }
-
-    if (orbMode === 'listening') {
-      setOrbMode('idle');
-    }
+    if (orbMode === 'listening') setOrbMode('idle');
 
     if (event.error === 'network') {
-      showActionPill('Offline Recognition Active');
+      showActionPill('Offline Engine Active');
+      if (isHandsFree && orbMode === 'idle') {
+        scheduleHandsFreeRestart(2500);
+      }
+    } else if (parsed.name === 'ERROR_CLIENT') {
+      console.log('[Speech] Transient ERROR_CLIENT on HyperOS');
+      if (isHandsFree && orbMode === 'idle') {
+        scheduleHandsFreeRestart(2500);
+      }
     } else {
-      showActionPill(`Mic: ${parsed.name}`);
+      // Do not display alarming internal error pills for transient recognizer issues
+      if (isHandsFree && orbMode === 'idle') {
+        scheduleHandsFreeRestart(2000);
+      }
     }
   });
 
   useSpeechRecognitionEvent('end', () => {
     if (silenceDebounceRef.current) clearTimeout(silenceDebounceRef.current);
+
+    // If speech engine is transitioning/cooldown, ignore the end event
+    if (speechEngine.isTransitioning()) {
+      return;
+    }
 
     // If there is an unprocessed transcript when speech ends, execute it immediately
     if (latestTranscriptRef.current) {
@@ -534,7 +645,7 @@ export default function App() {
       return;
     }
 
-    // Task A: When manual listening ends without speech, cleanly transition to idle without loops
+    // Manual listening ended without speech: cleanly transition to idle
     if (isManualListeningRef.current) {
       isManualListeningRef.current = false;
       if (manualListeningTimerRef.current) clearTimeout(manualListeningTimerRef.current);
@@ -542,14 +653,9 @@ export default function App() {
       return;
     }
 
-    // If hands-free is enabled and system is idle, enforce a 300ms grace period before re-engaging
-    if (isHandsFree && orbMode === 'idle' && !isManualListeningRef.current) {
-      if (handsFreeRestartRef.current) clearTimeout(handsFreeRestartRef.current);
-      handsFreeRestartRef.current = setTimeout(() => {
-        if (isHandsFree && orbMode === 'idle' && !isManualListeningRef.current && !oraActions.isSpeaking()) {
-          startListeningSession(true);
-        }
-      }, 300);
+    // If hands-free is enabled and system is idle, schedule restart via unified scheduler
+    if (isHandsFree && orbMode === 'idle') {
+      scheduleHandsFreeRestart(800);
     } else if (orbMode === 'listening') {
       setOrbMode('idle');
     }
@@ -558,19 +664,22 @@ export default function App() {
   const handleOrbPress = async () => {
     if (voiceTimeoutRef.current) clearTimeout(voiceTimeoutRef.current);
     if (silenceDebounceRef.current) clearTimeout(silenceDebounceRef.current);
-    if (handsFreeRestartRef.current) clearTimeout(handsFreeRestartRef.current);
+    if (handsFreeRestartRef.current) {
+      clearTimeout(handsFreeRestartRef.current);
+      handsFreeRestartRef.current = null;
+    }
 
     if (orbMode === 'listening' || orbMode === 'executing') {
-      // User tapped to cancel / interrupt
+      // User tapped to cancel / interrupt — give HAL 250ms to release
       isManualListeningRef.current = false;
       latestTranscriptRef.current = '';
       if (manualListeningTimerRef.current) clearTimeout(manualListeningTimerRef.current);
-      await speechEngine.stopAndCooldown(150);
+      await speechEngine.stopAndCooldown(250);
       setOrbMode('idle');
       return;
     }
 
-    // Task A: Strict Audio Session Handshake for Manual Tap
+    // Strict Audio Session Handshake for Manual Tap
     isManualListeningRef.current = true;
     failoverCountRef.current = 0;
     latestTranscriptRef.current = '';
@@ -578,11 +687,11 @@ export default function App() {
     setOrbMode('listening');
     showActionPill('Listening... Speak now');
 
-    // Reset provider index to top candidate on new manual tap
+    // Reset provider index to system default (candidate 0) on each new manual tap
     speechEngine.resetPackageIndex();
 
-    // Mandatory Hardware Cooldown Delay (150-200ms) to allow HAL to clear recording stream
-    await speechEngine.stopAndCooldown(200);
+    // Clean hardware cooldown before a new manual session
+    await speechEngine.stopAndCooldown(250);
 
     // Safe auto-timeout if user taps orb but never speaks
     if (manualListeningTimerRef.current) clearTimeout(manualListeningTimerRef.current);
@@ -591,11 +700,12 @@ export default function App() {
         isManualListeningRef.current = false;
         latestTranscriptRef.current = '';
         setOrbMode('idle');
+        showActionPill('Listening timed out');
       }
     }, 8000);
 
     // Launch single-shot manual speech session cleanly
-    startListeningSession(false);
+    await startListeningSession(false);
   };
 
   const handleSelectQuickCommand = (cmd: string) => {
@@ -614,345 +724,422 @@ export default function App() {
 
   return (
     <SafeAreaProvider>
-      <SafeAreaView style={styles.container}>
-        <StatusBar barStyle="light-content" backgroundColor="#050508" />
+      <LinearGradient
+        colors={['#030509', '#080C1B', '#020306']}
+        style={styles.gradientContainer}
+        start={{ x: 0.5, y: 0 }}
+        end={{ x: 0.5, y: 1 }}
+      >
+        <SafeAreaView style={styles.container}>
+          <StatusBar barStyle="light-content" backgroundColor="#030509" />
 
-        {/* Hidden physical camera for hardware flashlight fallback only on non-Android platforms */}
-        {Platform.OS !== 'web' && Platform.OS !== 'android' && permission?.granted && (
-          <CameraView
-            style={styles.hiddenCamera}
-            enableTorch={isTorchOn}
-            facing="back"
-          />
-        )}
+          {/* Hidden physical camera for hardware flashlight fallback only on non-Android platforms */}
+          {Platform.OS !== 'web' && Platform.OS !== 'android' && permission?.granted && (
+            <CameraView
+              style={styles.hiddenCamera}
+              enableTorch={isTorchOn}
+              facing="back"
+            />
+          )}
 
-        {/* Minimalist Executive Top Bar */}
-        <View style={styles.topBar}>
-          <Pressable
-            onPress={() => setIsDrawerOpen(true)}
-            style={({ pressed }) => [styles.iconButton, pressed && styles.iconButtonPressed]}
-            hitSlop={12}
-          >
-            <Ionicons name="apps-outline" size={20} color="#94A3B8" />
-          </Pressable>
+          {/* Ultra-Luxury Executive Top Bar */}
+          <View style={styles.topBar}>
+            <Pressable
+              onPress={() => {
+                Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Light).catch(() => {});
+                setIsDrawerOpen(true);
+              }}
+              style={({ pressed }) => [styles.iconButton, pressed && styles.iconButtonPressed]}
+              hitSlop={12}
+            >
+              <Ionicons name="grid-outline" size={18} color="#94A3B8" />
+            </Pressable>
 
-          {/* Discreet Ora Brand Pill */}
-          <View style={styles.brandPill}>
-            <View style={styles.sparkleDot} />
-            <Text style={styles.brandText}>Ora</Text>
-            <Text style={styles.brandSubtitle}>Offline Edge</Text>
+            {/* Glassmorphic Brand Status Pill */}
+            <View style={styles.brandPill}>
+              <View style={styles.livePulseDot} />
+              <Text style={styles.brandText}>ORA</Text>
+              <View style={styles.brandBadgeDivider} />
+              <Text style={styles.brandBadgeText}>100% On-Device</Text>
+            </View>
+
+            <Pressable
+              onPress={() => {
+                Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Light).catch(() => {});
+                setIsTextInputOpen(true);
+              }}
+              style={({ pressed }) => [styles.iconButton, pressed && styles.iconButtonPressed]}
+              hitSlop={12}
+            >
+              <Ionicons name="terminal-outline" size={18} color="#94A3B8" />
+            </Pressable>
           </View>
 
-          <Pressable
-            onPress={() => setIsTextInputOpen(true)}
-            style={({ pressed }) => [styles.iconButton, pressed && styles.iconButtonPressed]}
-            hitSlop={12}
-          >
-            <Ionicons name="chatbubble-ellipses-outline" size={20} color="#94A3B8" />
-          </Pressable>
-        </View>
+          {/* Hands-Free Wake Word Mode Toggle */}
+          <View style={styles.handsFreeContainer}>
+            <Pressable
+              onPress={() => {
+                const next = !isHandsFree;
+                Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Medium).catch(() => {});
+                setIsHandsFree(next);
+                showActionPill(next ? '🎙️ Hands-Free: "Hey Ora" Active' : 'Tap to Speak Mode');
+                if (!next) {
+                  try {
+                    ExpoSpeechRecognitionModule.stop();
+                  } catch (e) {}
+                }
+              }}
+              style={({ pressed }) => [
+                styles.handsFreeBadge,
+                isHandsFree && styles.handsFreeBadgeActive,
+                pressed && styles.iconButtonPressed,
+              ]}
+            >
+              <View style={[styles.handsFreeDot, isHandsFree && styles.handsFreeDotActive]} />
+              <Text style={[styles.handsFreeText, isHandsFree && styles.handsFreeTextActive]}>
+                {isHandsFree ? 'Wake Word: "Hey Ora" Active' : 'Hands-Free Paused (Tap to Speak)'}
+              </Text>
+              <Ionicons
+                name={isHandsFree ? 'checkmark-circle' : 'pause-circle-outline'}
+                size={13}
+                color={isHandsFree ? '#10B981' : '#64748B'}
+                style={{ marginLeft: 6 }}
+              />
+            </Pressable>
+          </View>
 
-        {/* Hands-Free Wake Word Mode Toggle */}
-        <View style={styles.handsFreeContainer}>
-          <Pressable
-            onPress={() => {
-              const next = !isHandsFree;
-              setIsHandsFree(next);
-              showActionPill(next ? '🎙️ Hands-Free Active ("Hey Ora")' : 'Tap to Speak Mode');
-              if (!next) {
-                try {
-                  ExpoSpeechRecognitionModule.stop();
-                } catch (e) {}
-              }
-            }}
-            style={({ pressed }) => [
-              styles.handsFreeBadge,
-              isHandsFree && styles.handsFreeBadgeActive,
-              pressed && styles.iconButtonPressed,
-            ]}
-          >
-            <View style={[styles.handsFreeDot, isHandsFree && styles.handsFreeDotActive]} />
-            <Text style={[styles.handsFreeText, isHandsFree && styles.handsFreeTextActive]}>
-              {isHandsFree ? 'Wake Word: "Hey Ora" (Active)' : 'Hands-Free Paused (Tap to Speak)'}
-            </Text>
-          </Pressable>
-        </View>
+          {/* Vertical Centerpiece Canvas */}
+          <View style={styles.centerCanvas}>
+            {/* Living Acoustic Orb with Ambient Dynamic Glow Aura */}
+            <View style={styles.orbAuraWrapper}>
+              <View
+                style={[
+                  styles.ambientAuraGlow,
+                  orbMode === 'listening' && styles.ambientAuraListening,
+                  orbMode === 'executing' && styles.ambientAuraExecuting,
+                  orbMode === 'confirmed' && styles.ambientAuraConfirmed,
+                  orbMode === 'error' && styles.ambientAuraError,
+                ]}
+              />
+              <OraOrb size={176} mode={orbMode} onPress={handleOrbPress} />
+            </View>
 
-        {/* Vertical Centerpiece Canvas */}
-        <View style={styles.centerCanvas}>
-          {/* Living Acoustic Orb */}
-          <OraOrb size={170} mode={orbMode} onPress={handleOrbPress} />
+            {/* Speech & Intent Typography */}
+            <View style={styles.textContainer}>
+              {transcript ? (
+                <Animated.Text
+                  entering={FadeIn.duration(180)}
+                  style={styles.activeTranscript}
+                  numberOfLines={2}
+                >
+                  "{transcript}"
+                </Animated.Text>
+              ) : orbMode === 'listening' ? (
+                <Animated.Text entering={FadeIn} style={styles.listeningPrompt}>
+                  Listening... speak now
+                </Animated.Text>
+              ) : (
+                <View style={styles.idlePromptContainer}>
+                  <Text style={styles.idlePromptHeader}>Hey Ora</Text>
+                  <Text style={styles.idlePromptSub}>
+                    {isHandsFree ? 'Say "Hey Ora" or tap orb to speak' : 'Tap orb or microphone to speak'}
+                  </Text>
+                </View>
+              )}
+            </View>
 
-          {/* Minimalist Speech & Intent Typography */}
-          <View style={styles.textContainer}>
-            {transcript ? (
-              <Animated.Text
-                entering={FadeIn.duration(200)}
-                style={styles.activeTranscript}
-                numberOfLines={2}
+            {/* Interactive Spoken Prompt Chips Carousel */}
+            {orbMode === 'idle' && !actionPill && (
+              <Animated.View entering={FadeInUp.delay(80).duration(260)} style={styles.promptChipsWrapper}>
+                <Text style={styles.promptChipsHeader}>QUICK COMMANDS</Text>
+                <ScrollView
+                  horizontal
+                  showsHorizontalScrollIndicator={false}
+                  contentContainerStyle={styles.promptChipsScroll}
+                >
+                  {QUICK_PROMPTS.map((item) => (
+                    <Pressable
+                      key={item.id}
+                      onPress={() => {
+                        Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Light).catch(() => {});
+                        processUtterance(item.command);
+                      }}
+                      style={({ pressed }) => [
+                        styles.promptChip,
+                        pressed && styles.promptChipPressed,
+                      ]}
+                    >
+                      <Ionicons name={item.icon} size={14} color="#F59E0B" style={{ marginRight: 6 }} />
+                      <Text style={styles.promptChipText}>{item.label}</Text>
+                    </Pressable>
+                  ))}
+                </ScrollView>
+              </Animated.View>
+            )}
+
+            {/* Dynamic Island Style Floating Action Feedback Pill */}
+            {actionPill && (
+              <Animated.View
+                entering={FadeInUp.springify().damping(16)}
+                exiting={FadeOutDown.duration(200)}
+                style={styles.actionPill}
               >
-                "{transcript}"
-              </Animated.Text>
-            ) : orbMode === 'listening' ? (
-              <Animated.Text entering={FadeIn} style={styles.listeningPrompt}>
-                Listening...
-              </Animated.Text>
-            ) : (
-              <View style={styles.idlePromptContainer}>
-                <Text style={styles.idlePromptHeader}>Hey Ora</Text>
-                <Text style={styles.idlePromptSub}>
-                  {isHandsFree ? 'Say "Hey Ora" or tap orb to speak' : 'Tap orb or microphone to speak'}
-                </Text>
-              </View>
+                <View style={styles.actionPillIndicator} />
+                <Text style={styles.actionPillText}>{actionPill}</Text>
+              </Animated.View>
+            )}
+
+            {/* Interactive Disambiguation Dialogue Card */}
+            {disambiguation && disambiguation.candidates.length > 0 && (
+              <Animated.View
+                entering={FadeInUp.springify().damping(18)}
+                exiting={FadeOutDown.duration(200)}
+                style={styles.disambiguationContainer}
+              >
+                <View style={styles.disambiguationHeader}>
+                  <Text style={styles.disambiguationTitle}>
+                    {disambiguation.action === 'call' ? 'Call which contact?' : 'Text which contact?'}
+                  </Text>
+                  <Pressable
+                    onPress={() => {
+                      contactsService.clearPendingDisambiguation();
+                      setOrbMode('idle');
+                    }}
+                    hitSlop={10}
+                  >
+                    <Ionicons name="close-circle-outline" size={20} color="#94A3B8" />
+                  </Pressable>
+                </View>
+
+                {disambiguation.candidates.map((candidate, idx) => (
+                  <Pressable
+                    key={candidate.id + '_' + idx}
+                    onPress={() => {
+                      processUtterance(`option ${idx + 1}`);
+                    }}
+                    style={({ pressed }) => [
+                      styles.disambiguationCard,
+                      pressed && styles.disambiguationCardPressed,
+                    ]}
+                  >
+                    <View style={styles.disambiguationBadge}>
+                      <Text style={styles.disambiguationBadgeText}>{idx + 1}</Text>
+                    </View>
+                    <View style={styles.disambiguationDetails}>
+                      <Text style={styles.disambiguationName} numberOfLines={1}>
+                        {candidate.name}
+                      </Text>
+                      <Text style={styles.disambiguationPhone} numberOfLines={1}>
+                        {candidate.phone}
+                      </Text>
+                    </View>
+                    <Ionicons
+                      name={disambiguation.action === 'call' ? 'call' : 'chatbubble'}
+                      size={18}
+                      color="#06B6D4"
+                    />
+                  </Pressable>
+                ))}
+              </Animated.View>
             )}
           </View>
 
-          {/* Floating Action Feedback Pill */}
-          {actionPill && (
-            <Animated.View
-              entering={FadeInUp.springify().damping(16)}
-              exiting={FadeOutDown.duration(220)}
-              style={styles.actionPill}
-            >
-              <Text style={styles.actionPillText}>{actionPill}</Text>
-            </Animated.View>
-          )}
-
-          {/* Interactive Disambiguation Dialogue Card */}
-          {disambiguation && disambiguation.candidates.length > 0 && (
-            <Animated.View
-              entering={FadeInUp.springify().damping(18)}
-              exiting={FadeOutDown.duration(200)}
-              style={styles.disambiguationContainer}
-            >
-              <View style={styles.disambiguationHeader}>
-                <Text style={styles.disambiguationTitle}>
-                  {disambiguation.action === 'call' ? 'Call which contact?' : 'Text which contact?'}
-                </Text>
-                <Pressable
-                  onPress={() => {
-                    contactsService.clearPendingDisambiguation();
-                    setOrbMode('idle');
-                  }}
-                  hitSlop={10}
-                >
-                  <Ionicons name="close-circle-outline" size={20} color="#94A3B8" />
-                </Pressable>
-              </View>
-
-              {disambiguation.candidates.map((candidate, idx) => (
-                <Pressable
-                  key={candidate.id + '_' + idx}
-                  onPress={() => {
-                    processUtterance(`option ${idx + 1}`);
-                  }}
-                  style={({ pressed }) => [
-                    styles.disambiguationCard,
-                    pressed && styles.disambiguationCardPressed,
-                  ]}
-                >
-                  <View style={styles.disambiguationBadge}>
-                    <Text style={styles.disambiguationBadgeText}>{idx + 1}</Text>
-                  </View>
-                  <View style={styles.disambiguationDetails}>
-                    <Text style={styles.disambiguationName} numberOfLines={1}>
-                      {candidate.name}
-                    </Text>
-                    <Text style={styles.disambiguationPhone} numberOfLines={1}>
-                      {candidate.phone}
-                    </Text>
-                  </View>
-                  <Ionicons
-                    name={disambiguation.action === 'call' ? 'call' : 'chatbubble'}
-                    size={18}
-                    color="#06B6D4"
-                  />
-                </Pressable>
-              ))}
-            </Animated.View>
-          )}
-        </View>
-
-        {/* Sleek Bottom Bar with Frosted Glass Mic Trigger */}
-        <View style={styles.bottomBar}>
-          {/* Torch Quick Status Button */}
-          <Pressable
-            onPress={() => {
-              const target = !isTorchOn;
-              setIsTorchOn(target);
-              showActionPill(target ? '⚡ Flashlight On' : '⚡ Flashlight Off');
-            }}
-            style={({ pressed }) => [
-              styles.secondaryButton,
-              isTorchOn && styles.secondaryButtonActive,
-              pressed && styles.iconButtonPressed,
-            ]}
-          >
-            <Ionicons
-              name={isTorchOn ? 'flashlight' : 'flashlight-outline'}
-              size={20}
-              color={isTorchOn ? '#FBBF24' : '#64748B'}
-            />
-          </Pressable>
-
-          {/* Central Master Microphone Trigger */}
-          <Pressable
-            onPress={handleOrbPress}
-            style={({ pressed }) => [
-              styles.micTrigger,
-              orbMode === 'listening' && styles.micTriggerActive,
-              pressed && styles.micTriggerPressed,
-            ]}
-          >
-            <View style={styles.micInnerGlow}>
-              <Ionicons
-                name={orbMode === 'listening' ? 'mic' : 'mic-outline'}
-                size={30}
-                color={orbMode === 'listening' ? '#FDE047' : '#F8FAFC'}
-              />
-            </View>
-          </Pressable>
-
-          {/* Quick Commands Sheet Trigger */}
-          <Pressable
-            onPress={() => setIsDrawerOpen(true)}
-            style={({ pressed }) => [styles.secondaryButton, pressed && styles.iconButtonPressed]}
-          >
-            <Ionicons name="sparkles-outline" size={20} color="#64748B" />
-          </Pressable>
-        </View>
-
-        {/* Executive Voice Capabilities & Offline Dashboard Modal */}
-        <Modal
-          visible={isDrawerOpen}
-          transparent
-          animationType="fade"
-          onRequestClose={() => setIsDrawerOpen(false)}
-        >
-          <Pressable style={styles.modalBackdrop} onPress={() => setIsDrawerOpen(false)}>
-            <Animated.View entering={FadeInUp.duration(220)} style={styles.modalSheet}>
-              <View style={styles.sheetHandle} />
-
-              <View style={styles.sheetHeaderRow}>
-                <View style={{ flex: 1 }}>
-                  <Text style={styles.sheetTitle}>ORA OFFLINE SYSTEM DASHBOARD</Text>
-                  <Text style={styles.sheetSubtitle}>Zero-Cloud Edge Intelligence • 100% Private</Text>
-                </View>
-              </View>
-
-              {/* Hardware & OS Subsystem Status Card */}
-              <View style={styles.statusCard}>
-                <View style={styles.statusRow}>
-                  <Ionicons name="shield-checkmark" size={13} color="#10B981" />
-                  <Text style={styles.statusLabel}>Acoustic Echo Guard:</Text>
-                  <Text style={styles.statusValue}>Active (Feedback Suppressed)</Text>
-                </View>
-                <View style={styles.statusRow}>
-                  <Ionicons name="hardware-chip-outline" size={13} color="#38BDF8" />
-                  <Text style={styles.statusLabel}>Universal App Launcher:</Text>
-                  <Text style={styles.statusValue}>Android PackageManager Active</Text>
-                </View>
-                <View style={styles.statusRow}>
-                  <Ionicons name="people-outline" size={13} color="#F59E0B" />
-                  <Text style={styles.statusLabel}>Phonebook Engine:</Text>
-                  <Text style={styles.statusValue}>
-                    {contactsCount > 0 ? `${contactsCount} Contacts (Live Auto-Sync)` : 'Connecting Phonebook...'}
-                  </Text>
-                </View>
-              </View>
-
-              <Text style={styles.sectionHeader}>VOICE CAPABILITIES (SPOKEN TEMPLATES)</Text>
-
-              <ScrollView
-                style={styles.capabilitiesScroll}
-                contentContainerStyle={styles.capabilitiesContainer}
-                showsVerticalScrollIndicator={false}
+          {/* Elevated Floating Glassmorphic Dock */}
+          <View style={styles.bottomDockContainer}>
+            <View style={styles.bottomDock}>
+              {/* Torch Quick Status Button */}
+              <Pressable
+                onPress={() => {
+                  const target = !isTorchOn;
+                  Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Light).catch(() => {});
+                  setIsTorchOn(target);
+                  showActionPill(target ? '⚡ Flashlight On' : '⚡ Flashlight Off');
+                }}
+                style={({ pressed }) => [
+                  styles.dockButton,
+                  isTorchOn && styles.dockButtonTorchActive,
+                  pressed && styles.iconButtonPressed,
+                ]}
               >
-                {CAPABILITY_GUIDE.map((category) => (
-                  <View key={category.id} style={styles.categoryCard}>
-                    <View style={styles.categoryHeader}>
-                      <Ionicons name={category.icon} size={15} color="#F59E0B" style={{ marginRight: 8 }} />
-                      <View style={{ flex: 1 }}>
-                        <Text style={styles.categoryTitle}>{category.name}</Text>
-                        <Text style={styles.categoryDesc}>{category.description}</Text>
+                <Ionicons
+                  name={isTorchOn ? 'flashlight' : 'flashlight-outline'}
+                  size={20}
+                  color={isTorchOn ? '#FBBF24' : '#94A3B8'}
+                />
+              </Pressable>
+
+              {/* Master Microphone Button */}
+              <Pressable
+                onPress={handleOrbPress}
+                style={({ pressed }) => [
+                  styles.masterMicButton,
+                  orbMode === 'listening' && styles.masterMicButtonActive,
+                  pressed && styles.masterMicButtonPressed,
+                ]}
+              >
+                <LinearGradient
+                  colors={
+                    orbMode === 'listening'
+                      ? ['#FDE047', '#EAB308', '#CA8A04']
+                      : ['rgba(255, 255, 255, 0.14)', 'rgba(255, 255, 255, 0.05)']
+                  }
+                  style={styles.masterMicGradient}
+                >
+                  <Ionicons
+                    name={orbMode === 'listening' ? 'mic' : 'mic-outline'}
+                    size={28}
+                    color={orbMode === 'listening' ? '#000000' : '#F8FAFC'}
+                  />
+                </LinearGradient>
+              </Pressable>
+
+              {/* Quick Commands & Capabilities Trigger */}
+              <Pressable
+                onPress={() => {
+                  Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Light).catch(() => {});
+                  setIsDrawerOpen(true);
+                }}
+                style={({ pressed }) => [styles.dockButton, pressed && styles.iconButtonPressed]}
+              >
+                <Ionicons name="sparkles-outline" size={20} color="#94A3B8" />
+              </Pressable>
+            </View>
+          </View>
+
+          {/* Executive Voice Capabilities & Offline Dashboard Modal */}
+          <Modal
+            visible={isDrawerOpen}
+            transparent
+            animationType="fade"
+            onRequestClose={() => setIsDrawerOpen(false)}
+          >
+            <Pressable style={styles.modalBackdrop} onPress={() => setIsDrawerOpen(false)}>
+              <Animated.View entering={FadeInUp.duration(220)} style={styles.modalSheet}>
+                <View style={styles.sheetHandle} />
+
+                <View style={styles.sheetHeaderRow}>
+                  <View style={{ flex: 1 }}>
+                    <Text style={styles.sheetTitle}>ORA OFFLINE SYSTEM DASHBOARD</Text>
+                    <Text style={styles.sheetSubtitle}>Zero-Cloud Edge Intelligence • 100% Private</Text>
+                  </View>
+                </View>
+
+                {/* Hardware & OS Subsystem Status Card */}
+                <View style={styles.statusCard}>
+                  <View style={styles.statusRow}>
+                    <Ionicons name="shield-checkmark" size={14} color="#10B981" />
+                    <Text style={styles.statusLabel}>Acoustic Echo Guard:</Text>
+                    <Text style={styles.statusValue}>Active (Feedback Suppressed)</Text>
+                  </View>
+                  <View style={styles.statusRow}>
+                    <Ionicons name="hardware-chip-outline" size={14} color="#38BDF8" />
+                    <Text style={styles.statusLabel}>Deterministic Engine:</Text>
+                    <Text style={styles.statusValue}>Needle Parser (&lt;15ms Latency)</Text>
+                  </View>
+                  <View style={styles.statusRow}>
+                    <Ionicons name="people-outline" size={14} color="#F59E0B" />
+                    <Text style={styles.statusLabel}>Phonebook Engine:</Text>
+                    <Text style={styles.statusValue}>
+                      {contactsCount > 0 ? `${contactsCount} Contacts (Live Local Cache)` : 'Connecting Phonebook...'}
+                    </Text>
+                  </View>
+                </View>
+
+                <Text style={styles.sectionHeader}>VOICE CAPABILITIES (SPOKEN TEMPLATES)</Text>
+
+                <ScrollView
+                  style={styles.capabilitiesScroll}
+                  contentContainerStyle={styles.capabilitiesContainer}
+                  showsVerticalScrollIndicator={false}
+                >
+                  {CAPABILITY_GUIDE.map((category) => (
+                    <View key={category.id} style={styles.categoryCard}>
+                      <View style={styles.categoryHeader}>
+                        <Ionicons name={category.icon} size={16} color="#F59E0B" style={{ marginRight: 8 }} />
+                        <View style={{ flex: 1 }}>
+                          <Text style={styles.categoryTitle}>{category.name}</Text>
+                          <Text style={styles.categoryDesc}>{category.description}</Text>
+                        </View>
+                      </View>
+
+                      <View style={styles.commandList}>
+                        {category.examples.map((cmd, idx) => (
+                          <Pressable
+                            key={idx}
+                            style={({ pressed }) => [
+                              styles.quickCommandItem,
+                              pressed && styles.quickCommandItemPressed,
+                            ]}
+                            onPress={() => handleSelectQuickCommand(cmd.phrase)}
+                          >
+                            <Ionicons name="mic-outline" size={13} color="#F59E0B" style={{ marginRight: 8 }} />
+                            <View style={{ flex: 1 }}>
+                              <Text style={styles.quickCommandText}>"{cmd.phrase}"</Text>
+                              <Text style={styles.quickCommandSub}>{cmd.detail}</Text>
+                            </View>
+                            <Ionicons name="arrow-forward" size={13} color="#475569" />
+                          </Pressable>
+                        ))}
                       </View>
                     </View>
+                  ))}
+                </ScrollView>
+              </Animated.View>
+            </Pressable>
+          </Modal>
 
-                    <View style={styles.commandList}>
-                      {category.examples.map((cmd, idx) => (
-                        <Pressable
-                          key={idx}
-                          style={({ pressed }) => [
-                            styles.quickCommandItem,
-                            pressed && styles.quickCommandItemPressed,
-                          ]}
-                          onPress={() => handleSelectQuickCommand(cmd.phrase)}
-                        >
-                          <Ionicons name="mic-outline" size={13} color="#F59E0B" style={{ marginRight: 8 }} />
-                          <View style={{ flex: 1 }}>
-                            <Text style={styles.quickCommandText}>"{cmd.phrase}"</Text>
-                            <Text style={styles.quickCommandSub}>{cmd.detail}</Text>
-                          </View>
-                          <Ionicons name="arrow-forward" size={13} color="#475569" />
-                        </Pressable>
-                      ))}
-                    </View>
-                  </View>
-                ))}
-              </ScrollView>
-            </Animated.View>
-          </Pressable>
-        </Modal>
-
-        {/* Text Input Modal for Silent Trigger */}
-        <Modal
-          visible={isTextInputOpen}
-          transparent
-          animationType="fade"
-          onRequestClose={() => setIsTextInputOpen(false)}
-        >
-          <KeyboardAvoidingView
-            behavior={Platform.OS === 'ios' ? 'padding' : 'height'}
-            style={styles.modalBackdrop}
+          {/* Text Input Modal for Silent Trigger */}
+          <Modal
+            visible={isTextInputOpen}
+            transparent
+            animationType="fade"
+            onRequestClose={() => setIsTextInputOpen(false)}
           >
-            <View style={styles.textInputCard}>
-              <Text style={styles.textInputLabel}>TYPE ASSISTANT COMMAND</Text>
-              <TextInput
-                style={styles.textInputField}
-                placeholder="e.g. Turn on flashlight, Call Mom..."
-                placeholderTextColor="#64748B"
-                value={typedInput}
-                onChangeText={setTypedInput}
-                onSubmitEditing={handleTextSubmit}
-                autoFocus
-                returnKeyType="send"
-              />
-              <View style={styles.textInputActions}>
-                <Pressable
-                  style={styles.cancelButton}
-                  onPress={() => setIsTextInputOpen(false)}
-                >
-                  <Text style={styles.cancelButtonText}>Cancel</Text>
-                </Pressable>
-                <Pressable
-                  style={styles.sendButton}
-                  onPress={handleTextSubmit}
-                >
-                  <Text style={styles.sendButtonText}>Send</Text>
-                </Pressable>
+            <KeyboardAvoidingView
+              behavior={Platform.OS === 'ios' ? 'padding' : 'height'}
+              style={styles.modalBackdrop}
+            >
+              <View style={styles.textInputCard}>
+                <Text style={styles.textInputLabel}>TYPE ASSISTANT COMMAND</Text>
+                <TextInput
+                  style={styles.textInputField}
+                  placeholder="e.g. Turn on flashlight, Call Mom..."
+                  placeholderTextColor="#64748B"
+                  value={typedInput}
+                  onChangeText={setTypedInput}
+                  onSubmitEditing={handleTextSubmit}
+                  autoFocus
+                  returnKeyType="send"
+                />
+                <View style={styles.textInputActions}>
+                  <Pressable
+                    style={styles.cancelButton}
+                    onPress={() => setIsTextInputOpen(false)}
+                  >
+                    <Text style={styles.cancelButtonText}>Cancel</Text>
+                  </Pressable>
+                  <Pressable
+                    style={styles.sendButton}
+                    onPress={handleTextSubmit}
+                  >
+                    <Text style={styles.sendButtonText}>Send</Text>
+                  </Pressable>
+                </View>
               </View>
-            </View>
-          </KeyboardAvoidingView>
-        </Modal>
-      </SafeAreaView>
+            </KeyboardAvoidingView>
+          </Modal>
+        </SafeAreaView>
+      </LinearGradient>
     </SafeAreaProvider>
   );
 }
 
 const styles = StyleSheet.create({
+  gradientContainer: {
+    flex: 1,
+  },
   container: {
     flex: 1,
-    backgroundColor: '#050508', // Deep luxury obsidian black
     justifyContent: 'space-between',
   },
   hiddenCamera: {
@@ -972,47 +1159,68 @@ const styles = StyleSheet.create({
     paddingBottom: 8,
   },
   iconButton: {
-    width: 40,
-    height: 40,
-    borderRadius: 20,
-    backgroundColor: 'rgba(255, 255, 255, 0.04)',
+    width: 42,
+    height: 42,
+    borderRadius: 21,
+    backgroundColor: 'rgba(255, 255, 255, 0.045)',
     borderWidth: 1,
     borderColor: 'rgba(255, 255, 255, 0.08)',
     justifyContent: 'center',
     alignItems: 'center',
+    shadowColor: '#000',
+    shadowOffset: { width: 0, height: 2 },
+    shadowOpacity: 0.3,
+    shadowRadius: 6,
+    elevation: 3,
   },
   iconButtonPressed: {
     opacity: 0.6,
+    transform: [{ scale: 0.95 }],
   },
   brandPill: {
     flexDirection: 'row',
     alignItems: 'center',
-    backgroundColor: 'rgba(255, 255, 255, 0.035)',
+    backgroundColor: 'rgba(255, 255, 255, 0.04)',
     borderWidth: 1,
-    borderColor: 'rgba(255, 255, 255, 0.07)',
-    paddingVertical: 6,
-    paddingHorizontal: 14,
+    borderColor: 'rgba(255, 255, 255, 0.08)',
+    paddingVertical: 7,
+    paddingHorizontal: 16,
     borderRadius: 9999,
+    shadowColor: '#000',
+    shadowOffset: { width: 0, height: 3 },
+    shadowOpacity: 0.4,
+    shadowRadius: 8,
+    elevation: 4,
   },
-  sparkleDot: {
-    width: 5,
-    height: 5,
-    borderRadius: 2.5,
-    backgroundColor: '#F59E0B',
-    marginRight: 8,
+  livePulseDot: {
+    width: 6,
+    height: 6,
+    borderRadius: 3,
+    backgroundColor: '#10B981',
+    marginRight: 9,
+    shadowColor: '#10B981',
+    shadowOffset: { width: 0, height: 0 },
+    shadowOpacity: 0.8,
+    shadowRadius: 4,
   },
   brandText: {
     fontSize: 13,
-    fontWeight: '700',
+    fontWeight: '800',
     color: '#F8FAFC',
-    letterSpacing: 0.5,
+    letterSpacing: 1.2,
   },
-  brandSubtitle: {
-    fontSize: 11,
-    fontWeight: '500',
-    color: '#64748B',
-    marginLeft: 6,
-    letterSpacing: 0.2,
+  brandBadgeDivider: {
+    width: 1,
+    height: 12,
+    backgroundColor: 'rgba(255, 255, 255, 0.15)',
+    marginHorizontal: 8,
+  },
+  brandBadgeText: {
+    fontSize: 10,
+    fontWeight: '700',
+    color: '#06B6D4',
+    letterSpacing: 0.6,
+    textTransform: 'uppercase',
   },
   handsFreeContainer: {
     alignItems: 'center',
@@ -1021,29 +1229,33 @@ const styles = StyleSheet.create({
   handsFreeBadge: {
     flexDirection: 'row',
     alignItems: 'center',
-    backgroundColor: 'rgba(255, 255, 255, 0.025)',
+    backgroundColor: 'rgba(255, 255, 255, 0.03)',
     borderWidth: 1,
-    borderColor: 'rgba(255, 255, 255, 0.06)',
-    paddingVertical: 4,
-    paddingHorizontal: 12,
+    borderColor: 'rgba(255, 255, 255, 0.07)',
+    paddingVertical: 5,
+    paddingHorizontal: 14,
     borderRadius: 9999,
   },
   handsFreeBadgeActive: {
-    backgroundColor: 'rgba(245, 158, 11, 0.08)',
-    borderColor: 'rgba(245, 158, 11, 0.25)',
+    backgroundColor: 'rgba(16, 185, 129, 0.08)',
+    borderColor: 'rgba(16, 185, 129, 0.28)',
   },
   handsFreeDot: {
     width: 6,
     height: 6,
     borderRadius: 3,
     backgroundColor: '#64748B',
-    marginRight: 7,
+    marginRight: 8,
   },
   handsFreeDotActive: {
     backgroundColor: '#10B981',
+    shadowColor: '#10B981',
+    shadowOffset: { width: 0, height: 0 },
+    shadowOpacity: 0.9,
+    shadowRadius: 4,
   },
   handsFreeText: {
-    fontSize: 10,
+    fontSize: 11,
     fontWeight: '600',
     color: '#64748B',
     letterSpacing: 0.3,
@@ -1055,10 +1267,37 @@ const styles = StyleSheet.create({
     flex: 1,
     justifyContent: 'center',
     alignItems: 'center',
-    paddingHorizontal: 28,
+    paddingHorizontal: 24,
+  },
+  orbAuraWrapper: {
+    position: 'relative',
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  ambientAuraGlow: {
+    position: 'absolute',
+    width: 220,
+    height: 220,
+    borderRadius: 110,
+    backgroundColor: 'rgba(245, 158, 11, 0.06)',
+  },
+  ambientAuraListening: {
+    backgroundColor: 'rgba(6, 182, 212, 0.18)',
+    transform: [{ scale: 1.2 }],
+  },
+  ambientAuraExecuting: {
+    backgroundColor: 'rgba(168, 85, 247, 0.22)',
+    transform: [{ scale: 1.15 }],
+  },
+  ambientAuraConfirmed: {
+    backgroundColor: 'rgba(16, 185, 129, 0.22)',
+    transform: [{ scale: 1.25 }],
+  },
+  ambientAuraError: {
+    backgroundColor: 'rgba(239, 68, 68, 0.2)',
   },
   textContainer: {
-    marginTop: 26,
+    marginTop: 24,
     alignItems: 'center',
     minHeight: 64,
     justifyContent: 'center',
@@ -1067,23 +1306,23 @@ const styles = StyleSheet.create({
     alignItems: 'center',
   },
   idlePromptHeader: {
-    fontSize: 24,
-    fontWeight: '500',
-    color: 'rgba(248, 250, 252, 0.55)',
-    letterSpacing: -0.4,
+    fontSize: 26,
+    fontWeight: '600',
+    color: 'rgba(248, 250, 252, 0.65)',
+    letterSpacing: -0.5,
   },
   idlePromptSub: {
     fontSize: 12,
     fontWeight: '400',
-    color: '#475569',
+    color: '#64748B',
     marginTop: 6,
-    letterSpacing: 0.2,
+    letterSpacing: 0.3,
   },
   listeningPrompt: {
-    fontSize: 24,
-    fontWeight: '600',
+    fontSize: 22,
+    fontWeight: '700',
     color: '#FDE047',
-    letterSpacing: -0.4,
+    letterSpacing: -0.3,
   },
   activeTranscript: {
     fontSize: 22,
@@ -1093,13 +1332,53 @@ const styles = StyleSheet.create({
     letterSpacing: -0.4,
     lineHeight: 30,
   },
+  promptChipsWrapper: {
+    width: '100%',
+    marginTop: 20,
+    alignItems: 'center',
+  },
+  promptChipsHeader: {
+    fontSize: 10,
+    fontWeight: '800',
+    color: '#64748B',
+    letterSpacing: 1.2,
+    marginBottom: 8,
+    textAlign: 'center',
+  },
+  promptChipsScroll: {
+    paddingHorizontal: 8,
+    gap: 8,
+    flexDirection: 'row',
+  },
+  promptChip: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    backgroundColor: 'rgba(255, 255, 255, 0.04)',
+    borderWidth: 1,
+    borderColor: 'rgba(255, 255, 255, 0.08)',
+    paddingVertical: 7,
+    paddingHorizontal: 12,
+    borderRadius: 9999,
+  },
+  promptChipPressed: {
+    backgroundColor: 'rgba(245, 158, 11, 0.15)',
+    borderColor: '#F59E0B',
+    transform: [{ scale: 0.96 }],
+  },
+  promptChipText: {
+    fontSize: 11,
+    fontWeight: '600',
+    color: '#E2E8F0',
+  },
   actionPill: {
-    marginTop: 22,
-    backgroundColor: 'rgba(15, 23, 42, 0.88)',
+    flexDirection: 'row',
+    alignItems: 'center',
+    marginTop: 20,
+    backgroundColor: 'rgba(15, 23, 42, 0.92)',
     borderWidth: 1,
     borderColor: 'rgba(255, 255, 255, 0.16)',
     paddingVertical: 10,
-    paddingHorizontal: 22,
+    paddingHorizontal: 20,
     borderRadius: 9999,
     shadowColor: '#000',
     shadowOffset: { width: 0, height: 6 },
@@ -1107,125 +1386,137 @@ const styles = StyleSheet.create({
     shadowRadius: 16,
     elevation: 12,
   },
+  actionPillIndicator: {
+    width: 6,
+    height: 6,
+    borderRadius: 3,
+    backgroundColor: '#F59E0B',
+    marginRight: 9,
+  },
   actionPillText: {
     fontSize: 13,
     fontWeight: '700',
     color: '#F8FAFC',
-    letterSpacing: 0.6,
+    letterSpacing: 0.5,
   },
-  bottomBar: {
-    flexDirection: 'row',
-    justifyContent: 'space-around',
-    alignItems: 'center',
-    paddingHorizontal: 32,
+  bottomDockContainer: {
+    paddingHorizontal: 24,
     paddingBottom: 28,
-    paddingTop: 12,
+    paddingTop: 8,
+    alignItems: 'center',
   },
-  secondaryButton: {
+  bottomDock: {
+    flexDirection: 'row',
+    justifyContent: 'space-between',
+    alignItems: 'center',
+    width: '100%',
+    maxWidth: 360,
+    backgroundColor: 'rgba(255, 255, 255, 0.035)',
+    borderWidth: 1,
+    borderColor: 'rgba(255, 255, 255, 0.07)',
+    borderRadius: 40,
+    paddingHorizontal: 16,
+    paddingVertical: 8,
+    shadowColor: '#000',
+    shadowOffset: { width: 0, height: 6 },
+    shadowOpacity: 0.4,
+    shadowRadius: 14,
+    elevation: 8,
+  },
+  dockButton: {
     width: 48,
     height: 48,
     borderRadius: 24,
-    backgroundColor: 'rgba(255, 255, 255, 0.035)',
+    backgroundColor: 'rgba(255, 255, 255, 0.04)',
     borderWidth: 1,
-    borderColor: 'rgba(255, 255, 255, 0.08)',
+    borderColor: 'rgba(255, 255, 255, 0.07)',
     justifyContent: 'center',
     alignItems: 'center',
   },
-  secondaryButtonActive: {
-    backgroundColor: 'rgba(245, 158, 11, 0.12)',
+  dockButtonTorchActive: {
+    backgroundColor: 'rgba(245, 158, 11, 0.14)',
     borderColor: 'rgba(245, 158, 11, 0.35)',
   },
-  micTrigger: {
-    width: 76,
-    height: 76,
-    borderRadius: 38,
+  masterMicButton: {
+    width: 68,
+    height: 68,
+    borderRadius: 34,
+    padding: 3,
     backgroundColor: 'rgba(255, 255, 255, 0.06)',
     borderWidth: 1.5,
-    borderColor: 'rgba(255, 255, 255, 0.14)',
+    borderColor: 'rgba(255, 255, 255, 0.15)',
     justifyContent: 'center',
     alignItems: 'center',
     shadowColor: '#F59E0B',
-    shadowOffset: { width: 0, height: 8 },
-    shadowOpacity: 0.25,
-    shadowRadius: 18,
+    shadowOffset: { width: 0, height: 6 },
+    shadowOpacity: 0.3,
+    shadowRadius: 14,
     elevation: 10,
   },
-  micTriggerActive: {
-    backgroundColor: 'rgba(245, 158, 11, 0.18)',
+  masterMicButtonActive: {
     borderColor: '#FACC15',
-    shadowOpacity: 0.5,
+    shadowOpacity: 0.6,
+    shadowRadius: 20,
   },
-  micTriggerPressed: {
+  masterMicButtonPressed: {
     transform: [{ scale: 0.94 }],
   },
-  micInnerGlow: {
+  masterMicGradient: {
+    width: '100%',
+    height: '100%',
+    borderRadius: 32,
     justifyContent: 'center',
     alignItems: 'center',
   },
   modalBackdrop: {
     flex: 1,
-    backgroundColor: 'rgba(0, 0, 0, 0.72)',
+    backgroundColor: 'rgba(0, 0, 0, 0.76)',
     justifyContent: 'flex-end',
   },
   modalSheet: {
-    backgroundColor: '#0B0D14',
-    borderTopLeftRadius: 28,
-    borderTopRightRadius: 28,
+    backgroundColor: '#0A0D16',
+    borderTopLeftRadius: 30,
+    borderTopRightRadius: 30,
     borderWidth: 1,
-    borderColor: 'rgba(255, 255, 255, 0.09)',
-    paddingHorizontal: 20,
+    borderColor: 'rgba(255, 255, 255, 0.1)',
+    paddingHorizontal: 22,
     paddingTop: 16,
     paddingBottom: 36,
     maxHeight: '85%',
   },
   sheetHandle: {
-    width: 38,
+    width: 40,
     height: 4,
     borderRadius: 2,
-    backgroundColor: 'rgba(255, 255, 255, 0.2)',
+    backgroundColor: 'rgba(255, 255, 255, 0.25)',
     alignSelf: 'center',
-    marginBottom: 14,
+    marginBottom: 16,
   },
   sheetHeaderRow: {
     flexDirection: 'row',
     alignItems: 'center',
     justifyContent: 'space-between',
-    marginBottom: 12,
+    marginBottom: 14,
   },
   sheetTitle: {
-    fontSize: 11,
+    fontSize: 12,
     fontWeight: '800',
-    color: '#64748B',
+    color: '#94A3B8',
     letterSpacing: 1.2,
   },
   sheetSubtitle: {
     fontSize: 12,
-    color: '#94A3B8',
+    color: '#64748B',
     marginTop: 2,
   },
-  syncButton: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    backgroundColor: 'rgba(245, 158, 11, 0.12)',
-    borderColor: 'rgba(245, 158, 11, 0.3)',
-    borderWidth: 1,
-    paddingVertical: 5,
-    paddingHorizontal: 10,
-    borderRadius: 9999,
-  },
-  syncButtonText: {
-    fontSize: 11,
-    fontWeight: '700',
-    color: '#F59E0B',
-  },
   statusCard: {
-    backgroundColor: 'rgba(255, 255, 255, 0.03)',
-    borderRadius: 14,
+    backgroundColor: 'rgba(255, 255, 255, 0.035)',
+    borderRadius: 16,
     borderWidth: 1,
-    borderColor: 'rgba(255, 255, 255, 0.06)',
-    padding: 12,
-    gap: 8,
-    marginBottom: 14,
+    borderColor: 'rgba(255, 255, 255, 0.07)',
+    padding: 14,
+    gap: 9,
+    marginBottom: 16,
   },
   statusRow: {
     flexDirection: 'row',
@@ -1235,7 +1526,7 @@ const styles = StyleSheet.create({
     fontSize: 11,
     fontWeight: '600',
     color: '#94A3B8',
-    marginLeft: 6,
+    marginLeft: 7,
     marginRight: 4,
   },
   statusValue: {
@@ -1306,9 +1597,9 @@ const styles = StyleSheet.create({
     marginTop: 1,
   },
   textInputCard: {
-    backgroundColor: '#0B0D14',
+    backgroundColor: '#0A0D16',
     margin: 20,
-    borderRadius: 20,
+    borderRadius: 22,
     borderWidth: 1,
     borderColor: 'rgba(255, 255, 255, 0.1)',
     padding: 20,

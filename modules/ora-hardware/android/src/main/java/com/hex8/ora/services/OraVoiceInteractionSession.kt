@@ -183,6 +183,7 @@ class OraVoiceInteractionSession(context: Context) : VoiceInteractionSession(con
 
   override fun onShow(args: Bundle?, showFlags: Int) {
     super.onShow(args, showFlags)
+    HardwareModule.isVoiceSessionActive = true
     // Smooth slide-up entrance animation from screen bottom
     bottomSheetView?.let { sheet ->
       sheet.translationY = 500f
@@ -395,6 +396,7 @@ class OraVoiceInteractionSession(context: Context) : VoiceInteractionSession(con
 
   override fun onHide() {
     super.onHide()
+    HardwareModule.isVoiceSessionActive = false
     try {
       releaseAudioFocus()
       speechRecognizer?.stopListening()

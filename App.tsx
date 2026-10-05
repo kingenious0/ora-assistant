@@ -356,7 +356,7 @@ export default function App() {
    */
   useEffect(() => {
     if (isHandsFree && orbMode === 'idle' && !isManualListeningRef.current) {
-      scheduleHandsFreeRestart(1000);
+      scheduleHandsFreeRestart(2500);
     } else {
       if (handsFreeRestartRef.current) {
         clearTimeout(handsFreeRestartRef.current);

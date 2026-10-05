@@ -72,12 +72,12 @@ class SpeechEngineService {
   /**
    * Discovers and orders all native speech recognition engines on this device.
    * Priority:
-   * 0. undefined (Android System Default Speech Recognizer — exactly what keyboard dictation uses)
-   * 1. Google App (com.google.android.googlequicksearchbox)
-   * 2. Xiaomi Speech Engine (com.xiaomi.mibrain.speech) - native on HyperOS / MIUI
-   * 3. Google Speech Services (com.google.android.tts)
-   * 4. Samsung Bixby (com.samsung.android.bixby.agent)
-   * 5. Android System Intelligence (com.google.android.as)
+   * 0. undefined (Android System Default Speech Recognizer — binds directly to Settings.Secure.VOICE_RECOGNITION_SERVICE without package restrictions)
+   * 1. Google Speech Services (com.google.android.tts)
+   * 2. Google App (com.google.android.googlequicksearchbox)
+   * 3. Xiaomi Speech Engine (com.xiaomi.mibrain.speech)
+   * 4. Android System Intelligence (com.google.android.as)
+   * 5. Samsung Bixby (com.samsung.android.bixby.agent)
    * Explicitly excludes Ora itself (com.hex8.ora) to prevent circular delegate deadlocks.
    */
   public getCandidatePackages(): (string | undefined)[] {
@@ -87,29 +87,24 @@ class SpeechEngineService {
 
     try {
       const allServices: string[] = ExpoSpeechRecognitionModule.getSpeechRecognitionServices() || [];
-      // Filter out our own package to prevent circular binding
       const validServices = allServices.filter((pkg: string) => pkg !== 'com.hex8.ora');
 
       const priorityPackages = [
-        'com.google.android.tts', // Speech Services by Google (verified default & installed on Xiaomi HyperOS)
-        'com.google.android.googlequicksearchbox', // Google App
-        'com.xiaomi.mibrain.speech', // Xiaomi Speech Engine
-        'com.google.android.as', // Android System Intelligence
-        'com.samsung.android.bixby.agent', // Samsung Bixby
+        'com.google.android.tts',
+        'com.google.android.googlequicksearchbox',
+        'com.xiaomi.mibrain.speech',
+        'com.google.android.as',
+        'com.samsung.android.bixby.agent',
       ];
 
-      const ordered: (string | undefined)[] = [];
+      // Always prioritize undefined (system default resolver) as Candidate 0
+      const ordered: (string | undefined)[] = [undefined];
 
-      // Add matching priority packages first
+      // Add matching priority packages next as fallbacks
       for (const priority of priorityPackages) {
         if (validServices.includes(priority) && !ordered.includes(priority)) {
           ordered.push(priority);
         }
-      }
-
-      // Add undefined (system default resolver) as a candidate
-      if (!ordered.includes(undefined)) {
-        ordered.push(undefined);
       }
 
       // Add any remaining non-self packages
@@ -119,7 +114,7 @@ class SpeechEngineService {
         }
       }
 
-      return ordered.length > 0 ? ordered : [undefined];
+      return ordered;
     } catch (e) {
       console.warn('[SpeechEngine] Error resolving recognition services:', e);
       return [undefined];
@@ -174,7 +169,7 @@ class SpeechEngineService {
    * Completely aborts any current recording stream and enforces a hardware cooldown
    * to allow Android's AudioFlinger / HAL to release exclusive PCM handles.
    */
-  public async stopAndCooldown(delayMs: number = 300): Promise<void> {
+  public async stopAndCooldown(delayMs: number = 250): Promise<void> {
     this.sessionActive = false;
     this.isCooldown = true;
     try {
@@ -188,36 +183,37 @@ class SpeechEngineService {
     }
   }
 
+  // Mutex lock to serialize startListening calls without permanent deadlocks
+  private startLock: Promise<void> = Promise.resolve();
+
   /**
    * Starts a resilient speech recognition session with strict hardware mutual exclusion.
-   *
-   * Uses a promise-chaining lock so hands-free auto-restart and manual tap can never
-   * race each other. Each call waits for any in-progress start to finish first.
+   * Uses a timeout-protected mutex lock so sequential starts never deadlock each other.
    */
-  public startListening(options: {
+  public async startListening(options: {
     continuous?: boolean;
     packageOverride?: string;
     onNotice?: (msg: string) => void;
   }): Promise<boolean> {
-    // If there is already a session starting, chain onto it rather than running in parallel
-    if (this.activeSessionPromise) {
-      console.log('[SpeechEngine] Session already starting — queuing after current promise');
-      this.activeSessionPromise = this.activeSessionPromise.then(() =>
-        this._doStartListening(options)
-      );
-    } else {
-      this.activeSessionPromise = this._doStartListening(options);
-    }
-
-    const thisPromise = this.activeSessionPromise;
-    thisPromise.finally(() => {
-      // Only clear the lock if this is still the most recent promise
-      if (this.activeSessionPromise === thisPromise) {
-        this.activeSessionPromise = null;
-      }
+    const previousLock = this.startLock;
+    let releaseLock: () => void;
+    this.startLock = new Promise<void>((resolve) => {
+      releaseLock = resolve;
     });
 
-    return thisPromise;
+    try {
+      // Wait for any prior start to settle, with a 1500ms safety timeout to prevent permanent hanging
+      await Promise.race([
+        previousLock,
+        new Promise((resolve) => setTimeout(resolve, 1500)),
+      ]);
+      return await this._doStartListening(options);
+    } catch (e: any) {
+      console.warn('[SpeechEngine] startListening exception:', e);
+      return false;
+    } finally {
+      releaseLock!();
+    }
   }
 
   private async _doStartListening(options: {
@@ -229,31 +225,41 @@ class SpeechEngineService {
     let pkg = options.packageOverride !== undefined ? options.packageOverride : this.getCurrentPackage();
 
     try {
-      const permissionRes = await ExpoSpeechRecognitionModule.requestPermissionsAsync();
-      if (!permissionRes.granted) {
-        options.onNotice?.('Microphone Permission Denied');
+      // 1. Fast permission check without triggering blocking dialogs if already granted
+      let hasMicPermission = false;
+      try {
+        const permStatus = await ExpoSpeechRecognitionModule.getPermissionsAsync();
+        hasMicPermission = permStatus?.granted ?? false;
+      } catch (_) {}
+
+      if (!hasMicPermission) {
+        try {
+          const req = await ExpoSpeechRecognitionModule.requestPermissionsAsync();
+          hasMicPermission = req?.granted ?? false;
+        } catch (_) {}
+      }
+
+      if (!hasMicPermission) {
+        options.onNotice?.('Microphone Permission Required');
         return false;
       }
 
-      // 1. Enforce strict hardware handshake: abort any prior session, wait for HAL release
+      // 2. State cleanup: abort prior active recognizer cleanly
       try {
         const state = await ExpoSpeechRecognitionModule.getStateAsync();
         if (state !== 'inactive') {
-          console.log(`[SpeechEngine] Engine was "${state}" — executing 300ms hardware cooldown`);
-          await this.stopAndCooldown(300);
+          console.log(`[SpeechEngine] State was "${state}" — aborting prior session`);
+          ExpoSpeechRecognitionModule.abort();
+          await new Promise((resolve) => setTimeout(resolve, 150));
         }
-      } catch (_) {
-        // getStateAsync not available on older versions — do a conservative cooldown anyway
-        await this.stopAndCooldown(200);
-      }
+      } catch (_) {}
 
       console.log(
-        `[SpeechEngine] Starting (continuous: ${options.continuous ?? false}) pkg: ${pkg || 'system-default'}`
+        `[SpeechEngine] Starting native recognizer (continuous: ${options.continuous ?? false}) pkg: ${pkg || 'system-default'}`
       );
 
       this.sessionActive = true;
 
-      // Standard recognition engine with EXTRA_PREFER_OFFLINE (uses local models if available without stalling)
       const startOptions: any = {
         lang: 'en-US',
         interimResults: true,
@@ -268,16 +274,16 @@ class SpeechEngineService {
         startOptions.androidRecognitionServicePackage = pkg;
       }
 
-      await ExpoSpeechRecognitionModule.start(startOptions);
+      ExpoSpeechRecognitionModule.start(startOptions);
       return true;
     } catch (err: any) {
       // Fallback: If a specific package failed on start, attempt system-default immediately
       if (pkg) {
         console.warn(`[SpeechEngine] Failed with package "${pkg}". Retrying with system default...`);
         try {
-          await this.stopAndCooldown(250);
+          await this.stopAndCooldown(200);
           this.sessionActive = true;
-          await ExpoSpeechRecognitionModule.start({
+          ExpoSpeechRecognitionModule.start({
             lang: 'en-US',
             interimResults: true,
             continuous: options.continuous ?? false,

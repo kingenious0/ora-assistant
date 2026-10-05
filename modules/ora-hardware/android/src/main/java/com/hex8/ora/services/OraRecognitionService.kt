@@ -88,6 +88,7 @@ class OraRecognitionService : RecognitionService() {
 
     // 0. Explicitly try trusted system on-device speech engines via ComponentName
     val explicitComponents = listOf(
+      android.content.ComponentName("com.google.android.tts", "com.google.android.apps.speech.tts.googletts.service.GoogleTTSRecognitionService"),
       android.content.ComponentName("com.google.android.tts", "com.google.android.apps.speech.tts.googletts.service.GoogleRecognitionService"),
       android.content.ComponentName("com.google.android.googlequicksearchbox", "com.google.android.voicesearch.serviceapi.GoogleRecognitionService"),
       android.content.ComponentName("com.xiaomi.mibrain.speech", "com.xiaomi.mibrain.speech.RecognitionService")

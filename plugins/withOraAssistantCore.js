@@ -27,7 +27,6 @@ const withOraAssistantConfigXml = (config) => {
       const voiceXmlContent = `<?xml version="1.0" encoding="utf-8"?>
 <voice-interaction-service xmlns:android="http://schemas.android.com/apk/res/android"
     android:sessionService="com.hex8.ora.services.OraVoiceInteractionSessionService"
-    android:recognitionService="com.hex8.ora.services.OraRecognitionService"
     android:supportsAssist="true"
     android:supportsLocalInteraction="true" />
 `;
